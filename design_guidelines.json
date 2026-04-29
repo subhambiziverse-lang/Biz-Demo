@@ -1,0 +1,106 @@
+{
+  "theme": "light",
+  "archetype": "Archetype 4: Swiss & High-Contrast (adapted for Indian B2B trust)",
+  "typography": {
+    "heading_font": "Cabinet Grotesk",
+    "body_font": "Manrope",
+    "font_imports": [
+      "@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap');",
+      "@import url('https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@800,500,700,400,900&display=swap');"
+    ],
+    "h1": "text-4xl sm:text-5xl lg:text-6xl font-black tracking-tight text-slate-950",
+    "h2": "text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight text-slate-900",
+    "h3": "text-xl sm:text-2xl font-bold text-slate-900",
+    "h4": "text-lg sm:text-xl font-semibold text-slate-800",
+    "body": "text-base font-medium text-slate-700 leading-relaxed",
+    "small": "text-sm font-medium text-slate-500",
+    "overline": "text-xs font-bold uppercase tracking-[0.2em] text-orange-600"
+  },
+  "colors": {
+    "background": "#F8FAFC",
+    "foreground": "#020617",
+    "card": "#FFFFFF",
+    "card_foreground": "#0F172A",
+    "primary": "#EA580C",
+    "primary_foreground": "#FFFFFF",
+    "secondary": "#0F172A",
+    "secondary_foreground": "#FFFFFF",
+    "muted": "#F1F5F9",
+    "muted_foreground": "#64748B",
+    "accent": "#FDE68A",
+    "accent_foreground": "#0F172A",
+    "border": "#E2E8F0",
+    "input": "#E2E8F0",
+    "ring": "#EA580C",
+    "sidebar": "#020617",
+    "sidebar_foreground": "#94A3B8"
+  },
+  "spacing_and_layout": {
+    "container_padding": "p-6 md:p-8 lg:p-12",
+    "section_gap": "gap-16 lg:gap-24",
+    "item_gap": "gap-6 lg:gap-8",
+    "border_radius": "rounded-xl",
+    "card_padding": "p-6 md:p-8",
+    "marketing_grid": "grid grid-cols-1 md:grid-cols-8 lg:grid-cols-12 gap-8 md:gap-12",
+    "dashboard_grid": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6"
+  },
+  "surfaces": {
+    "hero_overlay": "bg-gradient-to-r from-slate-950/80 via-slate-900/50 to-transparent",
+    "glass_header": "bg-white/70 backdrop-blur-xl border-b border-slate-200/50 shadow-sm",
+    "dashboard_card": "bg-white border border-slate-200 shadow-sm hover:shadow-md transition-shadow duration-200"
+  },
+  "motion": {
+    "hover": "transition-all duration-200 ease-in-out",
+    "fade_in": "animate-in fade-in duration-500",
+    "slide_up": "animate-in slide-in-from-bottom-4 duration-500"
+  },
+  "components": {
+    "marketing": {
+      "strategy": "Custom HTML/Tailwind. Use bento grid (Mode A) for features. Large typography, overlapping elements.",
+      "button": "bg-orange-600 hover:bg-orange-700 text-white font-bold py-4 px-8 rounded-full shadow-lg hover:shadow-orange-500/25 transition-all hover:-translate-y-0.5",
+      "marquee": "Use react-fast-marquee for a subtle editorial ribbon of trusted partner names."
+    },
+    "app_and_admin": {
+      "strategy": "Shadcn UI, highly customized. Use 'Control Room' grid (Mode B) for dashboard. Flat rectangular style with subtle rounded corners (8px).",
+      "sidebar": "bg-slate-950 text-slate-300 with active states in white/orange.",
+      "video_player": "border border-slate-200 rounded-2xl overflow-hidden shadow-2xl relative bg-black",
+      "chat_panel": "border-l border-slate-200 bg-white flex flex-col h-full"
+    }
+  },
+  "media": {
+    "icons_library": "lucide-react",
+    "image_urls": [
+      {
+        "url": "https://images.unsplash.com/photo-1695391396401-5fbb4bedafc1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzJ8MHwxfHNlYXJjaHwzfHxpbmRpYW4lMjBidXNpbmVzcyUyMG93bmVyJTIwd2FyZWhvdXNlfGVufDB8fHx8MTc3NzQzNjgwNXww&ixlib=rb-4.1.0&q=85",
+        "description": "Indian business owner in a store (arms crossed), representing the target audience.",
+        "category": "hero_or_testimonial"
+      },
+      {
+        "url": "https://images.pexels.com/photos/31199532/pexels-photo-31199532.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Woman in warehouse taking notes, excellent for the 'inventory/management' module illustration.",
+        "category": "feature_illustration"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1551288049-bebda4e38f71?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NTJ8MHwxfHNlYXJjaHwzfHxtb2Rlcm4lMjBkYXNoYm9hcmQlMjBpbnRlcmZhY2UlMjBhYnN0cmFjdHxlbnwwfHx8fDE3Nzc0MzY4MDV8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract performance analytics dashboard on a screen, useful for admin panel empty states or feature mockups.",
+        "category": "abstract_dashboard"
+      },
+      {
+        "url": "https://images.pexels.com/photos/27141307/pexels-photo-27141307.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Sleek futuristic digital interface, can be used as a subtle background pattern for the video player container.",
+        "category": "background_texture"
+      }
+    ]
+  },
+  "accessibility_and_testing": {
+    "contrast_strategy": "High contrast APCA compliance. Deep navy on white backgrounds. Orange CTA must have white text.",
+    "testing_attributes": "All interactive elements MUST include data-testid (e.g., data-testid='start-demo-btn')"
+  },
+  "instructions_to_main_agent": [
+    "Do NOT use generic SaaS purple/teal. Stick to the Saffron/Orange (primary) and Deep Navy (secondary) palette.",
+    "For the marketing page, use custom HTML/Tailwind with generous padding (p-8 to p-16) and avoid Shadcn structural components.",
+    "For the admin panel and onboarding quiz, use Shadcn components extensively.",
+    "Ensure the video demo player has a robust overlay system (absolute positioned elements inside a relative wrapper) for the cursor, highlights, and AI chat panel.",
+    "Update Tailwind config with the provided colors to ensure variables match."
+  ]
+}
