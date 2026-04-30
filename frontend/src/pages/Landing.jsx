@@ -17,9 +17,8 @@ export default function Landing() {
       <header className="bg-white/70 backdrop-blur-xl border-b border-slate-200/50 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 lg:px-12 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="h-9 w-9 rounded-xl bg-secondary text-white grid place-items-center font-display font-black">B</div>
-            <span className="font-display font-black text-xl text-secondary">Biziverse</span>
-            <span className="hidden sm:inline text-xs uppercase tracking-widest text-orange-600 font-bold ml-2 border-l border-slate-200 pl-3">Smart Demo</span>
+            <img src="https://biziverse.com/WebExt/img/logo2.jpg" alt="Biziverse" className="h-9 w-auto" />
+            <span className="hidden sm:inline text-xs uppercase tracking-widest text-orange-600 font-bold ml-1 border-l border-slate-200 pl-3">Smart Demo</span>
           </div>
           <div className="flex items-center gap-2">
             <select
@@ -71,7 +70,7 @@ export default function Landing() {
           </div>
 
           {/* Right: Biziverse product preview */}
-          <div className="lg:col-span-7 relative fade-up">
+          <div className="lg:col-span-7 relative fade-up lg:mt-12">
             {/* Decorative offset block */}
             <div className="absolute -top-4 -right-4 inset-0 bg-orange-100 rounded-3xl hidden md:block" />
             <div className="absolute -top-10 -left-10 w-40 h-40 bg-amber-200/60 rounded-full blur-3xl" />
@@ -106,7 +105,9 @@ export default function Landing() {
       {/* Footer */}
       <footer className="bg-secondary text-slate-300 py-10 mt-10">
         <div className="max-w-7xl mx-auto px-6 lg:px-12 flex flex-wrap items-center justify-between gap-6">
-          <div className="font-display font-black text-2xl text-white">Biziverse</div>
+          <div className="font-display font-black text-2xl text-white">
+            <img src="https://biziverse.com/WebExt/img/logo2.jpg" alt="Biziverse" className="h-8 w-auto bg-white px-2 py-1 rounded" />
+          </div>
           <div className="flex gap-6 text-sm">
             <Link to="/privacy" className="hover:text-white">{t(lang,"privacy")}</Link>
             <Link to="/admin/login" data-testid="admin-link" className="hover:text-white">Admin</Link>
