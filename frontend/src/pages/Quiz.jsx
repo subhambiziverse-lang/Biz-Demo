@@ -53,7 +53,7 @@ export default function Quiz() {
     <div className="min-h-screen bg-background bg-grid">
       <header className="bg-white/70 backdrop-blur-xl border-b border-slate-200/50">
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="font-display font-black text-xl text-secondary">Biziverse</div>
+          <div className="font-display font-black text-xl text-secondary"><img src="https://biziverse.com/WebExt/img/logo2.jpg" alt="Biziverse" className="h-8 w-auto" /></div>
           <div className="flex items-center gap-2">
             <div className="flex gap-1">{[0,1,2].map(i => <div key={i} className={`h-1.5 w-8 rounded-full ${i<=step?"bg-orange-600":"bg-slate-200"}`} />)}</div>
             <select data-testid="quiz-lang-select" value={lang} onChange={e=>setLang(e.target.value)} className="text-sm border border-slate-200 rounded-full px-3 py-1.5 ml-3 bg-white">
