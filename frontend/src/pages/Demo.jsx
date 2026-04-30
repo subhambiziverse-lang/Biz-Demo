@@ -24,6 +24,10 @@ export default function Demo() {
   const [captionsOn, setCaptionsOn] = useState(true);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
+  // End-of-demo flow
+  const [endFlow, setEndFlow] = useState(null); // null | "choose" | "offers" | "callback" | "callback_confirm"
+  const [phone, setPhone] = useState("");
+  const [callbackTime, setCallbackTime] = useState("");
 
   // Mini-demo state
   const [miniDemoVideo, setMiniDemoVideo] = useState(null);
@@ -81,16 +85,17 @@ export default function Demo() {
         events: {
           onReady: (e) => { try { e.target.playVideo(); } catch(err){} setDuration(e.target.getDuration() || 0); },
           onStateChange: (e) => {
-            if (e.data === 1) { setPlaying(true); }       // playing
-            else if (e.data === 2) setPlaying(false);    // paused
-            else if (e.data === 0) {                      // ended
+            if (e.data === 1) { setPlaying(true); }
+            else if (e.data === 2) setPlaying(false);
+            else if (e.data === 0) {
               if (inMiniDemo) exitMiniDemo();
               else if (vidIdx + 1 < videos.length) {
                 setShowTransition(true);
                 setTimeout(() => { setShowTransition(false); setVidIdx(i=>i+1); setMarkerIdx(-1); }, 1600);
               } else {
-                trackEvent("conversion_viewed");
-                nav("/conversion");
+                trackEvent("demo_ended");
+                setEndFlow("choose");
+                voice.stop();
               }
             }
           }
@@ -129,7 +134,7 @@ export default function Demo() {
       else if (vidIdx + 1 < videos.length) {
         setShowTransition(true);
         setTimeout(() => { setShowTransition(false); setVidIdx(i=>i+1); setMarkerIdx(-1); }, 1600);
-      } else { trackEvent("conversion_viewed"); nav("/conversion"); }
+      } else { trackEvent("demo_ended"); setEndFlow("choose"); voice.stop(); }
     };
     v.addEventListener("ended", onEnd);
     return () => v.removeEventListener("ended", onEnd);
@@ -299,10 +304,10 @@ export default function Demo() {
               <select data-testid="demo-lang-select" value={lang} onChange={e=>setLang(e.target.value)} className="text-sm border border-slate-200 rounded-full px-3 py-1.5 bg-white">
                 {LANGS.map(l=><option key={l.code} value={l.code}>{l.native}</option>)}
               </select>
-              <Button data-testid="voice-toggle" variant="outline" size="sm" onClick={()=>setVoiceOn(v=>!v)}>
+              <Button data-testid="voice-toggle" variant="outline" size="sm" onClick={()=>{ setVoiceOn(v => { const nv = !v; voice.setEnabled(nv); if (!nv) voice.stop(); return nv; }); }}>
                 {voiceOn ? <Volume2 className="h-4 w-4 mr-1.5" /> : <VolumeX className="h-4 w-4 mr-1.5" />} {t(lang, voiceOn?"voice_on":"voice_off")}
               </Button>
-              <Button data-testid="end-demo" variant="ghost" size="sm" onClick={()=>nav("/conversion")}>Skip to summary</Button>
+              <Button data-testid="end-demo" variant="ghost" size="sm" onClick={()=>{ voice.stop(); setEndFlow("choose"); }}>End demo</Button>
             </div>
           </div>
         </header>
@@ -496,6 +501,102 @@ export default function Demo() {
           )
         )}
       </main>
+
+      {/* End-of-demo modal */}
+      {endFlow && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-[60] grid place-items-center p-6" data-testid="end-flow-modal">
+          <div className="bg-white rounded-3xl p-8 max-w-lg w-full shadow-2xl">
+            {endFlow === "choose" && (
+              <>
+                <div className="text-xs uppercase tracking-widest text-orange-600 font-bold">Demo complete</div>
+                <h2 className="font-display text-3xl font-black text-secondary mt-2">What would you like next?</h2>
+                <p className="text-slate-500 text-sm mt-2">Pick an option to continue.</p>
+                <div className="grid gap-2 mt-6">
+                  <button data-testid="ef-explore" onClick={()=>{ setEndFlow(null); setVidIdx(0); setMarkerIdx(-1); setTimeout(()=>doPlay(),300); }}
+                    className="text-left p-4 rounded-xl border-2 border-slate-200 hover:border-orange-300 bg-white transition-colors">
+                    <div className="font-display font-bold text-secondary">Explore the demo again</div>
+                    <div className="text-xs text-slate-500">Restart from the first module</div>
+                  </button>
+                  <button data-testid="ef-offers" onClick={()=>{ setEndFlow("offers"); trackEvent("offers_selected"); }}
+                    className="text-left p-4 rounded-xl border-2 border-orange-500 bg-orange-50 transition-colors">
+                    <div className="font-display font-bold text-orange-700">Proceed to offers & get full access</div>
+                    <div className="text-xs text-slate-600">Grab your plan and start using Biziverse</div>
+                  </button>
+                  <button data-testid="ef-callback" onClick={()=>{ setEndFlow("callback"); trackEvent("callback_selected"); }}
+                    className="text-left p-4 rounded-xl border-2 border-slate-200 hover:border-slate-300 bg-white transition-colors">
+                    <div className="font-display font-bold text-secondary">Talk with an executive</div>
+                    <div className="text-xs text-slate-500">Schedule a call-back from our team</div>
+                  </button>
+                </div>
+                <button onClick={()=>setEndFlow(null)} className="mt-4 text-xs text-slate-400 hover:text-slate-600">Close</button>
+              </>
+            )}
+
+            {endFlow === "offers" && (
+              <>
+                <div className="text-xs uppercase tracking-widest text-orange-600 font-bold">Get started</div>
+                <h2 className="font-display text-3xl font-black text-secondary mt-2">Enter your mobile number</h2>
+                <p className="text-slate-500 text-sm mt-1">We'll take you to the offers page to complete your signup.</p>
+                <div className="mt-5 flex items-center gap-2">
+                  <div className="px-3 py-3 bg-slate-100 rounded-xl font-mono text-sm text-slate-600">+91</div>
+                  <input data-testid="ef-phone" type="tel" maxLength={10} value={phone}
+                    onChange={e=>setPhone(e.target.value.replace(/\D/g,""))}
+                    placeholder="10-digit mobile"
+                    className="flex-1 border-2 border-slate-200 rounded-xl px-4 py-3 font-mono text-lg focus:outline-none focus:border-orange-500" />
+                </div>
+                <Button data-testid="ef-offers-go" disabled={phone.length!==10}
+                  onClick={()=>{ trackEvent("offers_redirect", { phone }); window.open(`https://biziverse.com/GQik?i=${phone}`, "_blank"); setEndFlow(null); }}
+                  className="w-full mt-5 bg-orange-600 hover:bg-orange-700 text-white rounded-full h-12 font-bold disabled:opacity-50">
+                  Continue to Offers
+                </Button>
+                <button onClick={()=>setEndFlow("choose")} className="mt-3 text-xs text-slate-500 hover:text-secondary">← Back</button>
+              </>
+            )}
+
+            {endFlow === "callback" && (
+              <>
+                <div className="text-xs uppercase tracking-widest text-orange-600 font-bold">Schedule a call-back</div>
+                <h2 className="font-display text-3xl font-black text-secondary mt-2">Enter your details</h2>
+                <p className="text-slate-500 text-sm mt-1">Our executive will call you back at the time you choose.</p>
+                <div className="mt-5 flex items-center gap-2">
+                  <div className="px-3 py-3 bg-slate-100 rounded-xl font-mono text-sm text-slate-600">+91</div>
+                  <input data-testid="cb-phone" type="tel" maxLength={10} value={phone}
+                    onChange={e=>setPhone(e.target.value.replace(/\D/g,""))}
+                    placeholder="10-digit mobile"
+                    className="flex-1 border-2 border-slate-200 rounded-xl px-4 py-3 font-mono text-lg focus:outline-none focus:border-orange-500" />
+                </div>
+                <label className="block mt-4 text-xs uppercase tracking-widest text-slate-500 font-bold">Preferred call-back time</label>
+                <input data-testid="cb-time" type="datetime-local" value={callbackTime}
+                  min={(()=>{ const d=new Date(Date.now()+11*60*1000); d.setSeconds(0); return d.toISOString().slice(0,16); })()}
+                  onChange={e=>setCallbackTime(e.target.value)}
+                  className="mt-2 w-full border-2 border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:border-orange-500" />
+                <p className="text-xs text-slate-400 mt-1">Minimum 10 minutes from now.</p>
+                <Button data-testid="cb-submit"
+                  disabled={phone.length!==10 || !callbackTime || (new Date(callbackTime).getTime() - Date.now() < 10*60*1000)}
+                  onClick={()=>{ trackEvent("callback_requested", { phone, callbackTime }); setEndFlow("callback_confirm"); }}
+                  className="w-full mt-5 bg-secondary hover:bg-secondary/90 text-white rounded-full h-12 font-bold disabled:opacity-50">
+                  Request call-back
+                </Button>
+                <button onClick={()=>setEndFlow("choose")} className="mt-3 text-xs text-slate-500 hover:text-secondary">← Back</button>
+              </>
+            )}
+
+            {endFlow === "callback_confirm" && (
+              <>
+                <div className="h-16 w-16 mx-auto rounded-full bg-emerald-100 grid place-items-center mb-4"><Sparkles className="h-8 w-8 text-emerald-600" /></div>
+                <h2 className="font-display text-3xl font-black text-secondary text-center">Call-back scheduled</h2>
+                <p className="text-slate-600 text-sm mt-2 text-center">We'll try calling you back at:</p>
+                <div className="text-center font-display text-xl font-bold text-orange-600 mt-2">
+                  {callbackTime ? new Date(callbackTime).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : ""}
+                </div>
+                <p className="text-xs text-slate-400 text-center mt-3">on +91 {phone}</p>
+                <Button data-testid="cb-done" onClick={()=>{ setEndFlow(null); setPhone(""); setCallbackTime(""); }}
+                  className="w-full mt-6 bg-orange-600 hover:bg-orange-700 text-white rounded-full h-12 font-bold">Done</Button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
