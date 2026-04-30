@@ -1,53 +1,69 @@
-import { useEffect } from "react";
+import React from "react";
 import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import axios from "axios";
+import { BrowserRouter, Routes, Route, useLocation } from "react-router-dom";
+import { AppProvider } from "./contexts/AppContext";
+import { Toaster } from "./components/ui/sonner";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import Landing from "./pages/Landing";
+import Quiz from "./pages/Quiz";
+import Demo from "./pages/Demo";
+import Conversion from "./pages/Conversion";
+import Signup from "./pages/Signup";
+import PostSignup from "./pages/PostSignup";
+import AuthCallback from "./pages/AuthCallback";
+import Privacy from "./pages/Privacy";
 
-const Home = () => {
-  const helloWorldApi = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
-    }
-  };
+import AdminLogin from "./pages/admin/AdminLogin";
+import AdminLayout from "./pages/admin/AdminLayout";
+import AdminDashboard from "./pages/admin/AdminDashboard";
+import VideosPage from "./pages/admin/VideosPage";
+import VideoEditor from "./pages/admin/VideoEditor";
+import FlowsPage from "./pages/admin/FlowsPage";
+import CoveragePage from "./pages/admin/CoveragePage";
+import KBPage from "./pages/admin/KBPage";
+import MiniDemosPage from "./pages/admin/MiniDemosPage";
+import QuizOptionsPage from "./pages/admin/QuizOptionsPage";
+import AnalyticsPage from "./pages/admin/AnalyticsPage";
 
-  useEffect(() => {
-    helloWorldApi();
-  }, []);
-
+function Router() {
+  const location = useLocation();
+  // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+  if (location.hash && location.hash.includes("session_id=")) {
+    return <AuthCallback />;
+  }
   return (
-    <div>
-      <header className="App-header">
-        <a
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
+    <Routes>
+      <Route path="/" element={<Landing />} />
+      <Route path="/quiz" element={<Quiz />} />
+      <Route path="/demo" element={<Demo />} />
+      <Route path="/conversion" element={<Conversion />} />
+      <Route path="/signup" element={<Signup />} />
+      <Route path="/onboarding" element={<PostSignup />} />
+      <Route path="/privacy" element={<Privacy />} />
+      <Route path="/admin/login" element={<AdminLogin />} />
+      <Route path="/admin" element={<AdminLayout />}>
+        <Route index element={<AdminDashboard />} />
+        <Route path="videos" element={<VideosPage />} />
+        <Route path="videos/:id" element={<VideoEditor />} />
+        <Route path="flows" element={<FlowsPage />} />
+        <Route path="coverage" element={<CoveragePage />} />
+        <Route path="kb" element={<KBPage />} />
+        <Route path="mini-demos" element={<MiniDemosPage />} />
+        <Route path="quiz-options" element={<QuizOptionsPage />} />
+        <Route path="analytics" element={<AnalyticsPage />} />
+      </Route>
+    </Routes>
   );
-};
+}
 
 function App() {
   return (
-    <div className="App">
+    <AppProvider>
       <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
-          </Route>
-        </Routes>
+        <Router />
+        <Toaster />
       </BrowserRouter>
-    </div>
+    </AppProvider>
   );
 }
 
