@@ -25,7 +25,9 @@ export default function Demo() {
   const [duration, setDuration] = useState(0);
 
   // Mini-demo state
-  const [miniDemoVideo, setMiniDemoVideo] = useState(null);  // when set, plays this instead
+  const [miniDemoVideo, setMiniDemoVideo] = useState(null);
+  const [miniDemoTopic, setMiniDemoTopic] = useState("");  // user's question text
+  const userPausedRef = useRef(false);
 
   const [chat, setChat] = useState([]);
   const [chatInput, setChatInput] = useState("");
@@ -96,29 +98,24 @@ export default function Demo() {
     return () => { v.removeEventListener("timeupdate", onTime); v.removeEventListener("loadedmetadata", onMeta); };
   }, [currentVideo]);
 
-  const seekBy = (delta) => {
-    const v = videoRef.current; if (!v) return;
-    v.currentTime = Math.max(0, Math.min((v.currentTime||0) + delta, v.duration||0));
-    voice.stop();
-    setActiveNarration(null);
-    // Reset markers cursor based on new position
-    let newIdx = -1;
-    for (let i=0;i<markers.length;i++) if (markers[i].timestamp <= v.currentTime) newIdx = i;
-    setMarkerIdx(newIdx);
-  };
+  // Remove the separate seekBy since we now use skipToMarker
+  const triggerMarker_unused = () => {};
 
   const triggerMarker = (m) => {
     const v = videoRef.current; if (!v) return;
     v.pause();
     const text = m.narration?.[lang] || m.narration?.en || "";
     setActiveNarration({ text, marker: m });
-    setChat(c => [...c, { role: "ai", text, scripted: true }]);
+    // Narration shown ONLY on video caption, not in chat log
     voice.speak(text, lang, () => {
       const wait = (m.pause_duration || 0) * 1000;
       setTimeout(() => {
         setActiveNarration(null);
-        if (!tryYourselfMode && playing && videoRef.current) {
+        // Respect user-paused: don't auto-resume
+        if (userPausedRef.current) return;
+        if (!tryYourselfMode && videoRef.current) {
           videoRef.current.play().catch(()=>{});
+          setPlaying(true);
           if (!askedTry && markerIdx >= 1 && !inMiniDemo) {
             setAskedTry(true);
             const askText = t(lang, "want_try");
@@ -133,13 +130,57 @@ export default function Demo() {
   const togglePlay = () => {
     const v = videoRef.current; if (!v) return;
     if (v.paused) {
+      userPausedRef.current = false;
       v.play().catch(()=>{});
       setPlaying(true);
     } else {
+      userPausedRef.current = true;
       v.pause();
       setPlaying(false);
       voice.stop();
+      setActiveNarration(null);
     }
+  };
+
+  // Skip to previous/next MARKER (timestamp chapter), not 10s
+  const skipToMarker = (direction) => {
+    const v = videoRef.current; if (!v) return;
+    voice.stop();
+    setActiveNarration(null);
+    if (direction === "next") {
+      const next = markers.find(m => m.timestamp > v.currentTime + 0.2);
+      if (next) {
+        v.currentTime = next.timestamp;
+        const idx = markers.indexOf(next);
+        setMarkerIdx(idx - 1); // so the next marker will trigger when currentTime reaches it
+      } else {
+        v.currentTime = v.duration || 0;
+      }
+    } else {
+      // Previous marker before current
+      let target = null;
+      for (let i = markers.length - 1; i >= 0; i--) {
+        if (markers[i].timestamp < v.currentTime - 1) { target = markers[i]; break; }
+      }
+      if (target) {
+        v.currentTime = target.timestamp;
+        setMarkerIdx(markers.indexOf(target) - 1);
+      } else {
+        v.currentTime = 0;
+        setMarkerIdx(-1);
+      }
+    }
+    if (!userPausedRef.current) v.play().catch(()=>{});
+  };
+
+  // Jump to specific module (video) in the sequence
+  const jumpToModule = (idx) => {
+    if (idx < 0 || idx >= videos.length || idx === vidIdx) return;
+    voice.stop();
+    setActiveNarration(null);
+    setVidIdx(idx);
+    setMarkerIdx(-1);
+    setTimeout(()=> { if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.play().catch(()=>{}); } }, 200);
   };
 
   const tryYourself = () => {
@@ -153,7 +194,7 @@ export default function Demo() {
     trackEvent("demo_resumed");
   };
 
-  const playMiniDemo = async (miniId) => {
+  const playMiniDemo = async (miniId, topic = "") => {
     try {
       const r = await api.get(`/mini-demos/${miniId}`);
       const v = r.data?.video;
@@ -161,10 +202,12 @@ export default function Demo() {
       voice.stop();
       videoRef.current?.pause();
       setMiniDemoVideo(v);
+      setMiniDemoTopic(topic);
       setMarkerIdx(-1);
       setActiveNarration(null);
+      userPausedRef.current = false;
       setTimeout(()=> { videoRef.current && (videoRef.current.currentTime = 0); videoRef.current?.play().catch(()=>{}); }, 200);
-      trackEvent("mini_demo_started", { mini_id: miniId });
+      trackEvent("mini_demo_started", { mini_id: miniId, topic });
       setPendingMini(null);
     } catch (e) { console.error(e); }
   };
@@ -172,9 +215,11 @@ export default function Demo() {
   const exitMiniDemo = () => {
     voice.stop();
     setMiniDemoVideo(null);
+    setMiniDemoTopic("");
     setMarkerIdx(-1);
     setActiveNarration(null);
-    setTimeout(()=> { videoRef.current?.play().catch(()=>{}); }, 300);
+    userPausedRef.current = false;
+    setTimeout(()=> { videoRef.current?.play().catch(()=>{}); setPlaying(true); }, 300);
     trackEvent("mini_demo_exited");
   };
 
@@ -194,8 +239,8 @@ export default function Demo() {
       const linkedMini = r.data.linked_mini_demo_id;
       setChat(c => [...c, { role: "ai", text: ans }]);
       if (linkedMini) {
-        setPendingMini({ mini_id: linkedMini });
-        setChat(c => [...c, { role: "ai", text: "Want me to show you how this works?", prompt: "show_me", mini_id: linkedMini }]);
+        setPendingMini({ mini_id: linkedMini, topic: q });
+        setChat(c => [...c, { role: "ai", text: "Want me to show you how this works?", prompt: "show_me", mini_id: linkedMini, topic: q }]);
       }
       voice.speak(ans, lang, () => {
         if (!tryYourselfMode && playing && !linkedMini) videoRef.current?.play().catch(()=>{});
@@ -206,7 +251,7 @@ export default function Demo() {
     setChatLoading(false);
   };
 
-  const acceptShowMe = (miniId) => playMiniDemo(miniId);
+  const acceptShowMe = (miniId, topic) => playMiniDemo(miniId, topic);
   const declineShowMe = () => {
     setPendingMini(null);
     if (!tryYourselfMode && playing) videoRef.current?.play().catch(()=>{});
@@ -292,17 +337,16 @@ export default function Demo() {
               <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30">
                 <div className="px-4 py-1.5 bg-slate-950/70 backdrop-blur-md text-white rounded-full text-xs font-bold tracking-wider uppercase border border-white/10 flex items-center gap-2">
                   <span className="h-1.5 w-1.5 rounded-full bg-orange-500 animate-pulse" />
-                  {inMiniDemo ? "Mini-demo · " : ""}{currentVideo.title}
+                  {inMiniDemo ? `Mini-demo · ${miniDemoTopic || currentVideo.title}` : currentVideo.title}
                 </div>
               </div>
             )}
 
-            {/* Mini-demo "Return to demo" — icon-only, transparent */}
+            {/* Mini-demo "Return to demo" — prominent pill with label */}
             {inMiniDemo && !tryYourselfMode && (
               <button data-testid="exit-mini-demo" onClick={exitMiniDemo}
-                title="Return to demo"
-                className="absolute top-4 left-4 z-30 h-10 w-10 rounded-full bg-slate-950/40 hover:bg-slate-950/70 backdrop-blur-md text-white grid place-items-center border border-white/10 transition-colors">
-                <ArrowLeft className="h-4 w-4" />
+                className="absolute top-4 left-4 z-30 h-10 px-4 rounded-full bg-white/95 hover:bg-white text-slate-950 grid place-items-center shadow-lg border border-white/30 transition-colors">
+                <span className="flex items-center gap-2 text-sm font-bold"><ArrowLeft className="h-4 w-4" /> Return to Demo</span>
               </button>
             )}
 
@@ -343,13 +387,13 @@ export default function Demo() {
                   <div className="text-xs text-white/80 font-mono w-12">{fmtTime(duration)}</div>
                 </div>
                 <div className="flex items-center gap-1">
-                  <button data-testid="seek-back" onClick={()=>seekBy(-10)} title="-10 seconds"
+                  <button data-testid="seek-back" onClick={()=>skipToMarker("prev")} title="Previous section"
                     className="h-9 w-9 rounded-full text-white hover:bg-white/10 grid place-items-center"><SkipBack className="h-4 w-4" /></button>
                   <button data-testid="player-play-pause" onClick={togglePlay} title="Play/Pause"
                     className="h-10 w-10 rounded-full bg-white text-slate-950 hover:bg-orange-500 hover:text-white grid place-items-center transition-colors">
                     {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
                   </button>
-                  <button data-testid="seek-fwd" onClick={()=>seekBy(10)} title="+10 seconds"
+                  <button data-testid="seek-fwd" onClick={()=>skipToMarker("next")} title="Next section"
                     className="h-9 w-9 rounded-full text-white hover:bg-white/10 grid place-items-center"><SkipForward className="h-4 w-4" /></button>
                   <div className="flex-1" />
                   <button data-testid="captions-toggle" onClick={()=>setCaptionsOn(c=>!c)} title="Captions"
@@ -360,6 +404,20 @@ export default function Demo() {
               </div>
             )}
           </div>
+
+          {/* Module timeline / chapter navigator — below player */}
+          {!maximized && !tryYourselfMode && !inMiniDemo && videos.length > 1 && (
+            <div className="mt-4 bg-white border border-slate-200 rounded-2xl p-3">
+              <div className="flex items-center gap-2 overflow-x-auto thin-scroll">
+                {videos.map((v, i) => (
+                  <button key={v.id} data-testid={`module-chip-${i}`} onClick={()=>jumpToModule(i)}
+                    className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${i===vidIdx ? "bg-orange-600 text-white" : i<vidIdx ? "bg-slate-100 text-slate-500 line-through" : "bg-slate-100 text-slate-700 hover:bg-orange-50"}`}>
+                    <span className="opacity-60 mr-1">{i+1}.</span>{v.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Player controls (Try Yourself) — hide when maximized */}
           {!maximized && !tryYourselfMode && !inMiniDemo && (
@@ -439,7 +497,7 @@ function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline }) 
           <div>{m.text}</div>
           {m.prompt === "show_me" && m.mini_id && (
             <div className="flex gap-2 mt-2">
-              <Button data-testid="show-me-yes" size="sm" onClick={()=>onAccept(m.mini_id)} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs h-8">Show me</Button>
+              <Button data-testid="show-me-yes" size="sm" onClick={()=>onAccept(m.mini_id, m.topic)} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs h-8">Show me</Button>
               <Button data-testid="show-me-no" size="sm" variant="outline" onClick={onDecline} className="rounded-full text-xs h-8">No, thanks</Button>
             </div>
           )}
