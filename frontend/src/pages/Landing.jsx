@@ -37,7 +37,7 @@ export default function Landing() {
       {/* Hero */}
       <section className="relative overflow-hidden bg-grid">
         <div className="absolute inset-0 bg-gradient-to-b from-transparent via-white/30 to-white pointer-events-none" />
-        <div className="relative max-w-7xl mx-auto px-6 lg:px-12 pt-16 pb-16 grid lg:grid-cols-12 gap-10 items-center">
+        <div className="relative max-w-7xl mx-auto px-6 lg:px-12 pt-16 pb-16 grid lg:grid-cols-12 gap-10 items-start">
           <div className="lg:col-span-5 fade-up">
             <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-orange-50 border border-orange-100 rounded-full text-xs font-bold uppercase tracking-widest text-orange-600 mb-6">
               <Sparkles className="h-3.5 w-3.5" /> AI-guided product tour
@@ -82,7 +82,7 @@ export default function Landing() {
                 <span className="h-3 w-3 rounded-full bg-red-400" />
                 <span className="h-3 w-3 rounded-full bg-amber-400" />
                 <span className="h-3 w-3 rounded-full bg-emerald-400" />
-                <div className="ml-3 flex-1 bg-white rounded-md px-3 py-1 text-xs text-slate-400 font-mono">app.biziverse.com</div>
+                <div className="ml-3 flex-1 bg-white rounded-md px-3 py-1 text-xs text-slate-400 font-mono">biziverse.com</div>
               </div>
               <div className="relative">
                 <img
