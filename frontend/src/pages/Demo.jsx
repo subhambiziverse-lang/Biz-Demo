@@ -5,20 +5,30 @@ import { useApp } from "../contexts/AppContext";
 import { t, LANGS } from "../lib/i18n";
 import { voice } from "../lib/voice";
 import api from "../lib/api";
-import { Pause, Play, ExternalLink, RotateCw, Volume2, VolumeX, Send, Sparkles } from "lucide-react";
+import { Pause, Play, ExternalLink, RotateCw, Volume2, VolumeX, Send, Sparkles, ArrowLeft, Maximize2, Minimize2, X, MessageCircle } from "lucide-react";
 
 export default function Demo() {
   const nav = useNavigate();
   const { lang, setLang, voiceOn, setVoiceOn, sessionId, demoData, quiz, trackEvent } = useApp();
+
   const [vidIdx, setVidIdx] = useState(0);
   const [markerIdx, setMarkerIdx] = useState(-1);
+  const [activeNarration, setActiveNarration] = useState(null);   // {text, marker}
   const [playing, setPlaying] = useState(true);
-  const [interactive, setInteractive] = useState(false);
+  const [tryYourselfMode, setTryYourselfMode] = useState(false);  // iframe biziverse
   const [showTransition, setShowTransition] = useState(false);
   const [askedTry, setAskedTry] = useState(false);
+  const [maximized, setMaximized] = useState(false);
+  const [chatOpen, setChatOpen] = useState(true);
+
+  // Mini-demo state
+  const [miniDemoVideo, setMiniDemoVideo] = useState(null);  // when set, plays this instead
+
   const [chat, setChat] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [pendingMini, setPendingMini] = useState(null);  // {mini_id, kb_question}
+
   const videoRef = useRef(null);
   const playerRef = useRef(null);
   const chatEndRef = useRef(null);
@@ -29,14 +39,15 @@ export default function Demo() {
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
 
   const videos = demoData?.videos || [];
-  const currentVideo = videos[vidIdx];
-  const markers = (currentVideo?.markers || []).slice().sort((a,b)=>a.timestamp-b.timestamp);
+  const mainVideo = videos[vidIdx];
+  const currentVideo = miniDemoVideo || mainVideo;
+  const markers = ((currentVideo?.markers) || []).slice().sort((a,b)=>a.timestamp-b.timestamp);
+  const inMiniDemo = !!miniDemoVideo;
 
   // Marker watcher
   useEffect(() => {
-    if (!currentVideo || interactive) return;
-    const v = videoRef.current;
-    if (!v) return;
+    if (!currentVideo || tryYourselfMode) return;
+    const v = videoRef.current; if (!v) return;
     const handler = () => {
       if (markerIdx + 1 < markers.length && v.currentTime >= markers[markerIdx + 1].timestamp) {
         const nextIdx = markerIdx + 1;
@@ -46,17 +57,18 @@ export default function Demo() {
     };
     v.addEventListener("timeupdate", handler);
     return () => v.removeEventListener("timeupdate", handler);
-  }, [markerIdx, markers, interactive, currentVideo]);
+  }, [markerIdx, markers, tryYourselfMode, currentVideo]);
 
-  // Video end -> next or conversion
+  // Video end handling
   useEffect(() => {
     const v = videoRef.current; if (!v) return;
     const onEnd = () => {
-      if (vidIdx + 1 < videos.length) {
+      if (inMiniDemo) {
+        // Mini demo finished — return to main
+        exitMiniDemo();
+      } else if (vidIdx + 1 < videos.length) {
         setShowTransition(true);
-        setTimeout(() => {
-          setShowTransition(false); setVidIdx(i => i+1); setMarkerIdx(-1);
-        }, 1600);
+        setTimeout(() => { setShowTransition(false); setVidIdx(i=>i+1); setMarkerIdx(-1); }, 1600);
       } else {
         trackEvent("conversion_viewed");
         nav("/conversion");
@@ -65,31 +77,28 @@ export default function Demo() {
     v.addEventListener("ended", onEnd);
     return () => v.removeEventListener("ended", onEnd);
     // eslint-disable-next-line
-  }, [vidIdx, videos.length]);
+  }, [vidIdx, videos.length, inMiniDemo]);
 
-  // Auto-play attempt on video change
   useEffect(() => {
-    if (videoRef.current && playing && !interactive) {
-      videoRef.current.play().catch(()=>{});
-    }
-  }, [vidIdx, playing, interactive]);
+    if (videoRef.current && playing && !tryYourselfMode) videoRef.current.play().catch(()=>{});
+  }, [vidIdx, playing, tryYourselfMode, currentVideo]);
 
   const triggerMarker = (m) => {
     const v = videoRef.current; if (!v) return;
     v.pause();
     const text = m.narration?.[lang] || m.narration?.en || "";
+    setActiveNarration({ text, marker: m });
     setChat(c => [...c, { role: "ai", text, scripted: true }]);
     voice.speak(text, lang, () => {
-      // After narration, optional pause duration then resume
       const wait = (m.pause_duration || 0) * 1000;
       setTimeout(() => {
-        if (!interactive && playing && videoRef.current) {
+        setActiveNarration(null);
+        if (!tryYourselfMode && playing && videoRef.current) {
           videoRef.current.play().catch(()=>{});
-          // After 1-2 markers, ask "Want to try yourself?"
-          if (!askedTry && markerIdx >= 1) {
+          if (!askedTry && markerIdx >= 1 && !inMiniDemo) {
             setAskedTry(true);
             const askText = t(lang, "want_try");
-            setChat(c => [...c, { role: "ai", text: askText, ask: true }]);
+            setChat(c => [...c, { role: "ai", text: askText, prompt: "want_try" }]);
             voice.speak(askText, lang);
           }
         }
@@ -99,18 +108,50 @@ export default function Demo() {
 
   const togglePlay = () => {
     const v = videoRef.current; if (!v) return;
-    if (v.paused) { v.play(); setPlaying(true); voice.setEnabled(voiceOn); }
-    else { v.pause(); setPlaying(false); voice.stop(); }
+    if (v.paused) {
+      v.play().catch(()=>{});
+      setPlaying(true);
+    } else {
+      v.pause();
+      setPlaying(false);
+      voice.stop();
+    }
   };
 
   const tryYourself = () => {
-    setInteractive(true); voice.stop(); videoRef.current?.pause();
+    setTryYourselfMode(true); voice.stop(); videoRef.current?.pause();
     trackEvent("interactive_mode_entered");
-    window.open("https://app.biziverse.com", "_blank");
   };
-  const resumeDemo = () => {
-    setInteractive(false); setPlaying(true); videoRef.current?.play();
+  const exitTryYourself = () => {
+    setTryYourselfMode(false);
+    setPlaying(true);
+    setTimeout(()=> videoRef.current?.play().catch(()=>{}), 200);
     trackEvent("demo_resumed");
+  };
+
+  const playMiniDemo = async (miniId) => {
+    try {
+      const r = await api.get(`/mini-demos/${miniId}`);
+      const v = r.data?.video;
+      if (!v) return;
+      voice.stop();
+      videoRef.current?.pause();
+      setMiniDemoVideo(v);
+      setMarkerIdx(-1);
+      setActiveNarration(null);
+      setTimeout(()=> { videoRef.current && (videoRef.current.currentTime = 0); videoRef.current?.play().catch(()=>{}); }, 200);
+      trackEvent("mini_demo_started", { mini_id: miniId });
+      setPendingMini(null);
+    } catch (e) { console.error(e); }
+  };
+
+  const exitMiniDemo = () => {
+    voice.stop();
+    setMiniDemoVideo(null);
+    setMarkerIdx(-1);
+    setActiveNarration(null);
+    setTimeout(()=> { videoRef.current?.play().catch(()=>{}); }, 300);
+    trackEvent("mini_demo_exited");
   };
 
   const sendChat = async () => {
@@ -118,7 +159,7 @@ export default function Demo() {
     const q = chatInput.trim();
     setChat(c => [...c, { role: "user", text: q }]);
     setChatInput(""); setChatLoading(true);
-    if (!interactive) videoRef.current?.pause(); voice.stop();
+    if (!tryYourselfMode) videoRef.current?.pause(); voice.stop();
     try {
       const r = await api.post("/ai/chat", {
         session_id: sessionId, message: q, language: lang,
@@ -126,9 +167,14 @@ export default function Demo() {
         modules: quiz?.mods || [], current_step: vidIdx
       });
       const ans = r.data.answer || "";
+      const linkedMini = r.data.linked_mini_demo_id;
       setChat(c => [...c, { role: "ai", text: ans }]);
+      if (linkedMini) {
+        setPendingMini({ mini_id: linkedMini });
+        setChat(c => [...c, { role: "ai", text: "Want me to show you how this works?", prompt: "show_me", mini_id: linkedMini }]);
+      }
       voice.speak(ans, lang, () => {
-        if (!interactive && playing) videoRef.current?.play().catch(()=>{});
+        if (!tryYourselfMode && playing && !linkedMini) videoRef.current?.play().catch(()=>{});
       });
     } catch (e) {
       setChat(c => [...c, { role: "ai", text: "I'm having trouble answering right now. Please try again." }]);
@@ -136,55 +182,104 @@ export default function Demo() {
     setChatLoading(false);
   };
 
+  const acceptShowMe = (miniId) => playMiniDemo(miniId);
+  const declineShowMe = () => {
+    setPendingMini(null);
+    if (!tryYourselfMode && playing) videoRef.current?.play().catch(()=>{});
+  };
+
   const currentMarker = markerIdx >= 0 ? markers[markerIdx] : null;
   const transitionLabel = videos[vidIdx + 1]?.title || "";
 
+  // Layout: when maximized, full-screen video + floating chat. Otherwise split layout.
   return (
-    <div className="min-h-screen bg-slate-100">
+    <div className={maximized ? "fixed inset-0 bg-black z-50" : "min-h-screen bg-slate-100"}>
       {/* Top bar */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-50">
-        <div className="max-w-[1600px] mx-auto px-4 lg:px-8 py-3 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="font-display font-black text-lg text-secondary"><img src="https://biziverse.com/WebExt/img/logo2.jpg" alt="Biziverse" className="h-7 w-auto" /></div>
-            <span className="text-xs uppercase tracking-widest text-orange-600 font-bold border-l pl-3">Live Demo</span>
+      {!maximized && (
+        <header className="bg-white border-b border-slate-200 sticky top-0 z-40">
+          <div className="max-w-[1600px] mx-auto px-4 lg:px-8 py-3 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <Button data-testid="demo-back" variant="ghost" size="sm" onClick={()=>{ voice.stop(); nav("/quiz"); }} className="text-slate-600">
+                <ArrowLeft className="h-4 w-4 mr-1" /> {t(lang, "back")}
+              </Button>
+              <img src="https://biziverse.com/WebExt/img/logo2.jpg" alt="Biziverse" className="h-7 w-auto" />
+              <span className="text-xs uppercase tracking-widest text-orange-600 font-bold border-l pl-3">Live Demo</span>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="hidden md:flex items-center text-xs text-slate-500 mr-2">{currentVideo?.title}{inMiniDemo && " · Mini-demo"}</div>
+              <select data-testid="demo-lang-select" value={lang} onChange={e=>setLang(e.target.value)} className="text-sm border border-slate-200 rounded-full px-3 py-1.5 bg-white">
+                {LANGS.map(l=><option key={l.code} value={l.code}>{l.native}</option>)}
+              </select>
+              <Button data-testid="voice-toggle" variant="outline" size="sm" onClick={()=>setVoiceOn(v=>!v)}>
+                {voiceOn ? <Volume2 className="h-4 w-4 mr-1.5" /> : <VolumeX className="h-4 w-4 mr-1.5" />} {t(lang, voiceOn?"voice_on":"voice_off")}
+              </Button>
+              <Button data-testid="end-demo" variant="ghost" size="sm" onClick={()=>nav("/conversion")}>Skip to summary</Button>
+            </div>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="hidden md:flex items-center text-xs text-slate-500 mr-2">{currentVideo?.title}</div>
-            <select data-testid="demo-lang-select" value={lang} onChange={e=>setLang(e.target.value)} className="text-sm border border-slate-200 rounded-full px-3 py-1.5 bg-white">
-              {LANGS.map(l=><option key={l.code} value={l.code}>{l.native}</option>)}
-            </select>
-            <Button data-testid="voice-toggle" variant="outline" size="sm" onClick={()=>setVoiceOn(v=>!v)}>
-              {voiceOn ? <Volume2 className="h-4 w-4 mr-1.5" /> : <VolumeX className="h-4 w-4 mr-1.5" />} {t(lang, voiceOn?"voice_on":"voice_off")}
-            </Button>
-            <Button data-testid="end-demo" variant="ghost" size="sm" onClick={()=>nav("/conversion")}>Skip to summary</Button>
-          </div>
-        </div>
-      </header>
+        </header>
+      )}
 
-      <main className="max-w-[1600px] mx-auto px-4 lg:px-8 py-6 grid lg:grid-cols-12 gap-6">
-        {/* Video column */}
-        <div className="lg:col-span-8">
-          <div ref={playerRef} className="relative bg-black rounded-2xl overflow-hidden shadow-2xl border border-slate-200 aspect-video">
-            {currentVideo && (
-              <video ref={videoRef} data-testid="demo-video"
-                src={currentVideo.video_url}
-                className="w-full h-full object-cover" playsInline autoPlay muted={false}
-                preload="auto" />
+      <main className={maximized ? "h-screen w-screen relative" : "max-w-[1600px] mx-auto px-4 lg:px-8 py-6 grid lg:grid-cols-12 gap-6"}>
+        {/* Video / Iframe column */}
+        <div className={maximized ? "h-full w-full" : "lg:col-span-8"}>
+          <div ref={playerRef} className={`relative bg-black overflow-hidden ${maximized ? "w-full h-full" : "rounded-2xl shadow-2xl border border-slate-200 aspect-video"}`}>
+            {tryYourselfMode ? (
+              <iframe data-testid="biziverse-iframe" src="https://biziverse.com" title="Biziverse"
+                className="absolute inset-0 w-full h-full bg-white" />
+            ) : (
+              currentVideo && (
+                <video ref={videoRef} data-testid="demo-video"
+                  src={currentVideo.video_url}
+                  className="w-full h-full object-cover" playsInline autoPlay muted preload="auto" />
+              )
             )}
 
             {/* Highlight overlay */}
-            {currentMarker?.highlight && !interactive && (
+            {currentMarker?.highlight && !tryYourselfMode && (
               <div className="demo-highlight" style={{
                 left: `${currentMarker.highlight.x}%`, top: `${currentMarker.highlight.y}%`,
                 width: `${currentMarker.highlight.w}%`, height: `${currentMarker.highlight.h}%`,
                 borderRadius: currentMarker.highlight.shape === "circle" ? "50%" : "12px"
               }} />
             )}
-
             {/* Cursor */}
-            {currentMarker?.cursor && !interactive && (
+            {currentMarker?.cursor && !tryYourselfMode && (
               <div className="demo-cursor" style={{ left: `${currentMarker.cursor.x}%`, top: `${currentMarker.cursor.y}%` }} />
             )}
+
+            {/* Inline narration caption (over video) */}
+            {activeNarration && !tryYourselfMode && (
+              <div className="absolute left-1/2 -translate-x-1/2 bottom-6 max-w-2xl px-5 py-3 bg-slate-950/85 backdrop-blur-md text-white rounded-2xl shadow-2xl z-30 border border-white/10">
+                <div className="flex items-start gap-2">
+                  <div className="h-6 w-6 rounded-full bg-orange-600 grid place-items-center flex-shrink-0 mt-0.5"><Sparkles className="h-3 w-3" /></div>
+                  <div className="text-sm leading-relaxed">{activeNarration.text}</div>
+                </div>
+              </div>
+            )}
+
+            {/* Mini-demo "Return to demo" button */}
+            {inMiniDemo && !tryYourselfMode && (
+              <div className="absolute top-4 left-4 z-30">
+                <Button data-testid="exit-mini-demo" onClick={exitMiniDemo} className="bg-white text-secondary hover:bg-slate-100 rounded-full font-bold shadow-lg">
+                  <ArrowLeft className="h-4 w-4 mr-2" /> Return to Demo
+                </Button>
+              </div>
+            )}
+
+            {/* Try Yourself "Return to Demo" button */}
+            {tryYourselfMode && (
+              <div className="absolute top-4 left-4 z-30">
+                <Button data-testid="exit-try-yourself" onClick={exitTryYourself} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full font-bold shadow-lg">
+                  <ArrowLeft className="h-4 w-4 mr-2" /> Return to Demo
+                </Button>
+              </div>
+            )}
+
+            {/* Maximize / Minimize */}
+            <button onClick={()=>setMaximized(m=>!m)} data-testid="toggle-maximize"
+              className="absolute top-4 right-4 z-30 h-10 w-10 rounded-full bg-slate-950/70 hover:bg-slate-950 text-white grid place-items-center shadow-lg">
+              {maximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+            </button>
 
             {/* Transition between videos */}
             {showTransition && (
@@ -195,69 +290,111 @@ export default function Demo() {
                 </div>
               </div>
             )}
+          </div>
 
-            {/* Interactive overlay */}
-            {interactive && (
-              <div className="absolute inset-0 bg-secondary/85 grid place-items-center z-40 p-8 text-center">
-                <div className="max-w-md">
-                  <div className="text-xs uppercase tracking-widest text-amber-300 font-bold">Interactive Mode</div>
-                  <h3 className="font-display text-3xl font-black text-white mt-2">Now try it yourself</h3>
-                  <p className="text-white/80 mt-3">Biziverse has opened in a new tab. Explore the real product at your own pace. The AI assistant is still here to help.</p>
-                  <Button data-testid="resume-demo" onClick={resumeDemo} className="mt-6 bg-orange-600 hover:bg-orange-700 text-white rounded-full px-8 h-12 font-bold">
-                    <RotateCw className="mr-2 h-4 w-4" /> {t(lang,"resume_demo")}
-                  </Button>
-                </div>
+          {/* Player controls — hide when maximized */}
+          {!maximized && (
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              {!tryYourselfMode && (
+                <Button data-testid="play-pause" onClick={togglePlay} variant="outline" className="rounded-full">
+                  {playing ? <><Pause className="h-4 w-4 mr-2" /> {t(lang,"pause")}</> : <><Play className="h-4 w-4 mr-2" /> {t(lang,"play")}</>}
+                </Button>
+              )}
+              {!tryYourselfMode && !inMiniDemo && (
+                <Button data-testid="try-yourself" onClick={tryYourself} className="bg-secondary hover:bg-secondary/90 text-white rounded-full">
+                  <ExternalLink className="h-4 w-4 mr-2" /> {t(lang,"try_yourself")}
+                </Button>
+              )}
+              <div className="flex-1" />
+              <div className="text-sm text-slate-500">
+                {inMiniDemo ? "Mini-demo" : `Step ${vidIdx+1} of ${videos.length}`}
               </div>
-            )}
-          </div>
-
-          {/* Player controls */}
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <Button data-testid="play-pause" onClick={togglePlay} variant="outline" className="rounded-full">
-              {playing ? <><Pause className="h-4 w-4 mr-2" /> {t(lang,"pause")}</> : <><Play className="h-4 w-4 mr-2" /> {t(lang,"play")}</>}
-            </Button>
-            <Button data-testid="try-yourself" onClick={tryYourself} className="bg-secondary hover:bg-secondary/90 text-white rounded-full">
-              <ExternalLink className="h-4 w-4 mr-2" /> {t(lang,"try_yourself")}
-            </Button>
-            <div className="flex-1" />
-            <div className="text-sm text-slate-500">Step {vidIdx+1} of {videos.length}</div>
-          </div>
+            </div>
+          )}
         </div>
 
-        {/* AI Assistant panel */}
-        <aside className="lg:col-span-4 bg-white border border-slate-200 rounded-2xl flex flex-col h-[calc(100vh-180px)] sticky top-[72px]">
-          <div className="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
-            <div className="h-9 w-9 rounded-full bg-orange-100 grid place-items-center"><Sparkles className="h-4 w-4 text-orange-600" /></div>
-            <div>
-              <div className="font-display font-bold text-secondary">Biziverse AI</div>
-              <div className="text-xs text-emerald-600 flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Live</div>
-            </div>
-          </div>
-          <div className="flex-1 overflow-y-auto thin-scroll px-5 py-4 space-y-3">
-            {chat.length === 0 && (
-              <div className="text-sm text-slate-500 bg-slate-50 rounded-xl p-3 border border-slate-200">
-                Hi! I'll narrate this demo and answer any questions you have. Try asking <em>"Does this support GST?"</em> or <em>"How does Recovery work?"</em>
+        {/* AI Assistant — sidebar OR floating bubble */}
+        {!maximized ? (
+          <aside className="lg:col-span-4 bg-white border border-slate-200 rounded-2xl flex flex-col h-[calc(100vh-180px)] sticky top-[72px]">
+            <ChatHeader lang={lang} />
+            <ChatBody chat={chat} chatLoading={chatLoading} chatEndRef={chatEndRef} lang={lang}
+              onAccept={acceptShowMe} onDecline={declineShowMe} />
+            <ChatInput lang={lang} chatInput={chatInput} setChatInput={setChatInput} send={sendChat} />
+          </aside>
+        ) : (
+          // Floating chat bubble in maximized mode
+          chatOpen ? (
+            <div className="fixed bottom-6 right-6 w-96 h-[520px] bg-white border border-slate-200 rounded-2xl shadow-2xl flex flex-col z-50">
+              <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <div className="h-8 w-8 rounded-full bg-orange-100 grid place-items-center"><Sparkles className="h-4 w-4 text-orange-600" /></div>
+                  <div className="font-display font-bold text-secondary">Biziverse AI</div>
+                </div>
+                <button onClick={()=>setChatOpen(false)} className="text-slate-400 hover:text-slate-600"><X className="h-4 w-4" /></button>
               </div>
-            )}
-            {chat.map((m,i)=>(
-              <div key={i} className={`text-sm ${m.role==="user"?"ml-auto bg-orange-600 text-white":"bg-slate-100 text-slate-800"} max-w-[85%] rounded-2xl px-4 py-2.5`}>
-                {m.text}
-              </div>
-            ))}
-            {chatLoading && <div className="text-xs text-slate-500">AI is thinking…</div>}
-            <div ref={chatEndRef} />
-          </div>
-          <div className="px-5 py-4 border-t border-slate-200">
-            <div className="flex gap-2">
-              <input data-testid="chat-input" value={chatInput} onChange={e=>setChatInput(e.target.value)}
-                onKeyDown={e=>{if(e.key==="Enter") sendChat();}}
-                placeholder={t(lang,"ask_anything")}
-                className="flex-1 border border-slate-200 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500" />
-              <Button data-testid="chat-send" onClick={sendChat} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full h-10 w-10 p-0"><Send className="h-4 w-4" /></Button>
+              <ChatBody chat={chat} chatLoading={chatLoading} chatEndRef={chatEndRef} lang={lang}
+                onAccept={acceptShowMe} onDecline={declineShowMe} />
+              <ChatInput lang={lang} chatInput={chatInput} setChatInput={setChatInput} send={sendChat} />
             </div>
-          </div>
-        </aside>
+          ) : (
+            <button data-testid="open-chat-bubble" onClick={()=>setChatOpen(true)}
+              className="fixed bottom-6 right-6 h-14 w-14 rounded-full bg-orange-600 hover:bg-orange-700 text-white shadow-2xl shadow-orange-500/40 grid place-items-center z-50">
+              <MessageCircle className="h-6 w-6" />
+            </button>
+          )
+        )}
       </main>
+    </div>
+  );
+}
+
+function ChatHeader({ lang }) {
+  return (
+    <div className="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
+      <div className="h-9 w-9 rounded-full bg-orange-100 grid place-items-center"><Sparkles className="h-4 w-4 text-orange-600" /></div>
+      <div>
+        <div className="font-display font-bold text-secondary">Biziverse AI</div>
+        <div className="text-xs text-emerald-600 flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Live</div>
+      </div>
+    </div>
+  );
+}
+
+function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline }) {
+  return (
+    <div className="flex-1 overflow-y-auto thin-scroll px-5 py-4 space-y-3">
+      {chat.length === 0 && (
+        <div className="text-sm text-slate-500 bg-slate-50 rounded-xl p-3 border border-slate-200">
+          Hi! I'll narrate this demo and answer any questions you have. Try asking <em>"Does this support GST?"</em> or <em>"How does Recovery work?"</em>
+        </div>
+      )}
+      {chat.map((m,i)=>(
+        <div key={i} className={`text-sm ${m.role==="user"?"ml-auto bg-orange-600 text-white":"bg-slate-100 text-slate-800"} max-w-[90%] rounded-2xl px-4 py-2.5`}>
+          <div>{m.text}</div>
+          {m.prompt === "show_me" && m.mini_id && (
+            <div className="flex gap-2 mt-2">
+              <Button data-testid="show-me-yes" size="sm" onClick={()=>onAccept(m.mini_id)} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs h-8">Show me</Button>
+              <Button data-testid="show-me-no" size="sm" variant="outline" onClick={onDecline} className="rounded-full text-xs h-8">No, thanks</Button>
+            </div>
+          )}
+        </div>
+      ))}
+      {chatLoading && <div className="text-xs text-slate-500">AI is thinking…</div>}
+      <div ref={chatEndRef} />
+    </div>
+  );
+}
+
+function ChatInput({ lang, chatInput, setChatInput, send }) {
+  return (
+    <div className="px-5 py-4 border-t border-slate-200">
+      <div className="flex gap-2">
+        <input data-testid="chat-input" value={chatInput} onChange={e=>setChatInput(e.target.value)}
+          onKeyDown={e=>{if(e.key==="Enter") send();}}
+          placeholder={t(lang,"ask_anything")}
+          className="flex-1 border border-slate-200 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500" />
+        <Button data-testid="chat-send" onClick={send} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full h-10 w-10 p-0"><Send className="h-4 w-4" /></Button>
+      </div>
     </div>
   );
 }

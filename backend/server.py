@@ -423,7 +423,7 @@ async def ai_chat(payload: ChatIn):
         logger.error(f"LLM error: {e}")
         text = base_answer or "I'm having trouble answering right now. Please try again or ask a different question."
 
-    return {"answer": text, "linked_mini_demo_id": linked_mini, "from_kb": bool(kb_hit)}
+    return {"answer": text, "linked_mini_demo_id": linked_mini, "from_kb": bool(kb_hit), "kb_question": kb_hit.get("question") if kb_hit else None}
 
 # ========== Signup (Mocked OTP + Razorpay) ==========
 @api.post("/signup/otp/send")
@@ -589,6 +589,18 @@ async def update_kb(kid: str, payload: KBEntryIn, user=Depends(admin_dep)):
 async def delete_kb(kid: str, user=Depends(admin_dep)):
     await db.kb_entries.delete_one({"id": kid})
     return {"ok": True}
+
+# ========== Public Mini-Demos ==========
+@api.get("/mini-demos/{mid}")
+async def get_mini_demo_public(mid: str):
+    m = await db.mini_demos.find_one({"id": mid}, {"_id": 0})
+    if not m:
+        raise HTTPException(404, "Not found")
+    # Attach linked video if any
+    if m.get("module_video_id"):
+        v = await db.module_videos.find_one({"id": m["module_video_id"]}, {"_id": 0})
+        m["video"] = v
+    return m
 
 # ========== Admin: Mini-Demos ==========
 @api.get("/admin/mini-demos")
@@ -769,6 +781,23 @@ async def seed_data():
             "linked_mini_demo_id": None,
             "created_at": datetime.now(timezone.utc).isoformat()
         })
+
+    # Seed a sample mini-demo and link it to the GST KB entry
+    first_video = await db.module_videos.find_one({"module_key": "sales_invoices"}, {"_id": 0})
+    if first_video:
+        mini_id = f"mini_{uuid.uuid4().hex[:10]}"
+        await db.mini_demos.insert_one({
+            "id": mini_id,
+            "name": "How GST Invoice Works",
+            "module_video_id": first_video["id"],
+            "steps": [],
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+        # Link to GST KB entry
+        await db.kb_entries.update_one(
+            {"question": {"$regex": "GST", "$options": "i"}},
+            {"$set": {"linked_mini_demo_id": mini_id}}
+        )
 
     return {"ok": True, "seeded_videos": len(seed_videos), "seeded_kb": len(kb_seed)}
 
