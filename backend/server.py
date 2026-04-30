@@ -694,7 +694,7 @@ async def seed_data():
     if existing > 0:
         return {"ok": True, "already_seeded": True}
 
-    sample_url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+    sample_url = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"
 
     seed_videos = [
         {"module_key": "crm", "title": "CRM — Manage Inquiries"},
