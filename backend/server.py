@@ -740,22 +740,17 @@ async def seed_data():
     if existing > 0:
         return {"ok": True, "already_seeded": True}
 
-    sample_url = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"
-
+    # Seed the two real videos provided by user
     seed_videos = [
-        {"module_key": "crm", "title": "CRM — Manage Inquiries"},
-        {"module_key": "quotes", "title": "Quotes & Proforma"},
-        {"module_key": "sales_orders", "title": "Sales Orders"},
-        {"module_key": "sales_invoices", "title": "Sales Invoices with GST"},
-        {"module_key": "recovery", "title": "Recovery — Pending Payments"},
-        {"module_key": "inventory", "title": "Batch-wise Inventory"},
-        {"module_key": "purchases", "title": "Purchases & GRN"},
-        {"module_key": "reports", "title": "Reports Dashboard"},
+        {"module_key": "crm", "title": "CRM — Leads Management",
+         "video_url": "https://www.youtube.com/embed/ch3VGEvq71U"},
+        {"module_key": "quotes", "title": "Quotes Management",
+         "video_url": "https://www.youtube.com/embed/NzV7te7hlvQ"},
     ]
     for sv in seed_videos:
         vid = f"vid_{uuid.uuid4().hex[:10]}"
         markers = [
-            {"id": str(uuid.uuid4()), "timestamp": 2.0, "pause_duration": 4,
+            {"id": str(uuid.uuid4()), "timestamp": 5.0, "pause_duration": 4,
              "highlight": {"x": 12, "y": 18, "w": 35, "h": 12, "shape": "rect"},
              "cursor": {"x": 28, "y": 24},
              "narration": {
@@ -763,26 +758,26 @@ async def seed_data():
                  "hi": f"नमस्ते! यह {sv['title']} स्क्रीन है — देखें कितना आसान है।",
                  "gu": f"નમસ્તે! આ {sv['title']} સ્ક્રીન છે — જુઓ કેટલું સરળ છે.",
                  "mr": f"नमस्कार! ही {sv['title']} स्क्रीन आहे — पहा किती सोपे आहे."}},
-            {"id": str(uuid.uuid4()), "timestamp": 8.0, "pause_duration": 5,
+            {"id": str(uuid.uuid4()), "timestamp": 20.0, "pause_duration": 5,
              "highlight": {"x": 45, "y": 35, "w": 40, "h": 18, "shape": "rect"},
              "cursor": {"x": 65, "y": 42},
              "narration": {
-                 "en": "Your customers are organized here with full payment history.",
-                 "hi": "आपके ग्राहक यहां पूरे भुगतान इतिहास के साथ संगठित हैं।",
-                 "gu": "તમારા ગ્રાહકો અહીં સંપૂર્ણ ચુકવણી ઇતિહાસ સાથે છે.",
-                 "mr": "तुमचे ग्राहक येथे पूर्ण पेमेंट इतिहासासह आहेत."}},
-            {"id": str(uuid.uuid4()), "timestamp": 16.0, "pause_duration": 5,
+                 "en": "Your data is organized here with full history — all in one place.",
+                 "hi": "आपका डेटा यहां पूरे इतिहास के साथ संगठित है।",
+                 "gu": "તમારો ડેટા અહીં સંપૂર્ણ ઇતિહાસ સાથે છે.",
+                 "mr": "तुमचा डेटा येथे पूर्ण इतिहासासह आहे."}},
+            {"id": str(uuid.uuid4()), "timestamp": 45.0, "pause_duration": 5,
              "highlight": {"x": 30, "y": 55, "w": 50, "h": 15, "shape": "rect"},
              "cursor": {"x": 55, "y": 62},
              "narration": {
                  "en": "You currently have ₹3,42,000 pending. Tracking this improves cash flow.",
                  "hi": "आपके ₹3,42,000 बाकी हैं। इसे ट्रैक करना cashflow बेहतर करता है।",
-                 "gu": "તમારે ₹3,42,000 બાકી છે. આ ટ્રેક કરવાથી રોકડ પ્રવાહ સુધરે છે.",
-                 "mr": "तुमचे ₹3,42,000 बाकी आहेत. हे ट्रॅक केल्यास रोख प्रवाह सुधारतो."}},
+                 "gu": "તમારે ₹3,42,000 બાકી છે.",
+                 "mr": "तुमचे ₹3,42,000 बाकी आहेत."}},
         ]
         await db.module_videos.insert_one({
             "id": vid, "module_key": sv["module_key"], "title": sv["title"],
-            "video_url": sample_url, "storage_path": "", "duration": 60,
+            "video_url": sv["video_url"], "storage_path": "", "duration": 120,
             "markers": markers, "published": True,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat(),

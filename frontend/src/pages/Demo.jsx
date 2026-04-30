@@ -5,7 +5,8 @@ import { useApp } from "../contexts/AppContext";
 import { t, LANGS } from "../lib/i18n";
 import { voice } from "../lib/voice";
 import api from "../lib/api";
-import { Pause, Play, ExternalLink, Volume2, VolumeX, Send, Sparkles, ArrowLeft, Maximize2, Minimize2, X, MessageCircle, SkipBack, SkipForward, Subtitles } from "lucide-react";
+import { Pause, Play, ExternalLink, Volume2, VolumeX, Send, Sparkles, ArrowLeft, Maximize2, Minimize2, X, MessageCircle, Subtitles } from "lucide-react";
+import { loadYouTubeAPI, extractYouTubeId, isYouTube } from "../lib/youtube";
 
 export default function Demo() {
   const nav = useNavigate();
@@ -35,6 +36,9 @@ export default function Demo() {
   const [pendingMini, setPendingMini] = useState(null);  // {mini_id, kb_question}
 
   const videoRef = useRef(null);
+  const ytPlayerRef = useRef(null);
+  const ytContainerRef = useRef(null);
+  const ytIntervalRef = useRef(null);
   const playerRef = useRef(null);
   const chatEndRef = useRef(null);
 
@@ -49,72 +53,108 @@ export default function Demo() {
   const markers = ((currentVideo?.markers) || []).slice().sort((a,b)=>a.timestamp-b.timestamp);
   const inMiniDemo = !!miniDemoVideo;
 
-  // Marker watcher
+  const isYT = isYouTube(currentVideo?.video_url || "");
+
+  // Player abstraction — works for both HTML5 video and YouTube
+  const doPlay = () => { isYT ? ytPlayerRef.current?.playVideo?.() : videoRef.current?.play().catch(()=>{}); };
+  const doPause = () => { isYT ? ytPlayerRef.current?.pauseVideo?.() : videoRef.current?.pause(); };
+  const doSeek = (t) => { isYT ? ytPlayerRef.current?.seekTo?.(t, true) : (videoRef.current && (videoRef.current.currentTime = t)); };
+  const doGetTime = () => { return isYT ? (ytPlayerRef.current?.getCurrentTime?.() || 0) : (videoRef.current?.currentTime || 0); };
+  const doGetDuration = () => { return isYT ? (ytPlayerRef.current?.getDuration?.() || 0) : (videoRef.current?.duration || 0); };
+  const doIsPaused = () => { return isYT ? (ytPlayerRef.current?.getPlayerState?.() !== 1) : (videoRef.current?.paused ?? true); };
+
+  // Initialize YouTube player when currentVideo changes to YT url
+  useEffect(() => {
+    if (!currentVideo) return;
+    if (!isYT) {
+      if (ytPlayerRef.current) { try { ytPlayerRef.current.destroy(); } catch(e){} ytPlayerRef.current = null; }
+      return;
+    }
+    let cancelled = false;
+    loadYouTubeAPI().then(YT => {
+      if (cancelled || !ytContainerRef.current) return;
+      const vid = extractYouTubeId(currentVideo.video_url);
+      if (ytPlayerRef.current) { try { ytPlayerRef.current.destroy(); } catch(e){} }
+      ytPlayerRef.current = new YT.Player(ytContainerRef.current, {
+        videoId: vid,
+        playerVars: { autoplay: 1, controls: 0, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, disablekb: 1 },
+        events: {
+          onReady: (e) => { try { e.target.playVideo(); } catch(err){} setDuration(e.target.getDuration() || 0); },
+          onStateChange: (e) => {
+            if (e.data === 1) { setPlaying(true); }       // playing
+            else if (e.data === 2) setPlaying(false);    // paused
+            else if (e.data === 0) {                      // ended
+              if (inMiniDemo) exitMiniDemo();
+              else if (vidIdx + 1 < videos.length) {
+                setShowTransition(true);
+                setTimeout(() => { setShowTransition(false); setVidIdx(i=>i+1); setMarkerIdx(-1); }, 1600);
+              } else {
+                trackEvent("conversion_viewed");
+                nav("/conversion");
+              }
+            }
+          }
+        }
+      });
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line
+  }, [currentVideo?.id, isYT]);
+
+  // Unified time + marker poller (works for both players)
   useEffect(() => {
     if (!currentVideo || tryYourselfMode) return;
-    const v = videoRef.current; if (!v) return;
-    const handler = () => {
-      if (markerIdx + 1 < markers.length && v.currentTime >= markers[markerIdx + 1].timestamp) {
+    if (ytIntervalRef.current) clearInterval(ytIntervalRef.current);
+    ytIntervalRef.current = setInterval(() => {
+      const t = doGetTime();
+      const d = doGetDuration();
+      setProgress(t);
+      if (d && Math.abs(d - duration) > 0.5) setDuration(d);
+      if (markerIdx + 1 < markers.length && t >= markers[markerIdx + 1].timestamp) {
         const nextIdx = markerIdx + 1;
         setMarkerIdx(nextIdx);
         triggerMarker(markers[nextIdx]);
       }
-    };
-    v.addEventListener("timeupdate", handler);
-    return () => v.removeEventListener("timeupdate", handler);
-  }, [markerIdx, markers, tryYourselfMode, currentVideo]);
+    }, 400);
+    return () => { if (ytIntervalRef.current) clearInterval(ytIntervalRef.current); };
+    // eslint-disable-next-line
+  }, [markerIdx, markers, tryYourselfMode, currentVideo?.id, isYT]);
 
-  // Video end handling
+  // Legacy MP4-only listeners (kept for non-YT)
   useEffect(() => {
+    if (isYT) return;
     const v = videoRef.current; if (!v) return;
     const onEnd = () => {
-      if (inMiniDemo) {
-        // Mini demo finished — return to main
-        exitMiniDemo();
-      } else if (vidIdx + 1 < videos.length) {
+      if (inMiniDemo) exitMiniDemo();
+      else if (vidIdx + 1 < videos.length) {
         setShowTransition(true);
         setTimeout(() => { setShowTransition(false); setVidIdx(i=>i+1); setMarkerIdx(-1); }, 1600);
-      } else {
-        trackEvent("conversion_viewed");
-        nav("/conversion");
-      }
+      } else { trackEvent("conversion_viewed"); nav("/conversion"); }
     };
     v.addEventListener("ended", onEnd);
     return () => v.removeEventListener("ended", onEnd);
     // eslint-disable-next-line
-  }, [vidIdx, videos.length, inMiniDemo]);
+  }, [vidIdx, videos.length, inMiniDemo, isYT]);
 
   useEffect(() => {
+    if (isYT) return;
     if (videoRef.current && playing && !tryYourselfMode) videoRef.current.play().catch(()=>{});
-  }, [vidIdx, playing, tryYourselfMode, currentVideo]);
-
-  // Track video time for progress bar
-  useEffect(() => {
-    const v = videoRef.current; if (!v) return;
-    const onTime = () => { setProgress(v.currentTime || 0); };
-    const onMeta = () => { setDuration(v.duration || 0); };
-    v.addEventListener("timeupdate", onTime);
-    v.addEventListener("loadedmetadata", onMeta);
-    return () => { v.removeEventListener("timeupdate", onTime); v.removeEventListener("loadedmetadata", onMeta); };
-  }, [currentVideo]);
+  }, [vidIdx, playing, tryYourselfMode, currentVideo, isYT]);
 
   // Remove the separate seekBy since we now use skipToMarker
   const triggerMarker_unused = () => {};
 
   const triggerMarker = (m) => {
-    const v = videoRef.current; if (!v) return;
-    v.pause();
+    doPause();
     const text = m.narration?.[lang] || m.narration?.en || "";
     setActiveNarration({ text, marker: m });
-    // Narration shown ONLY on video caption, not in chat log
     voice.speak(text, lang, () => {
       const wait = (m.pause_duration || 0) * 1000;
       setTimeout(() => {
         setActiveNarration(null);
-        // Respect user-paused: don't auto-resume
         if (userPausedRef.current) return;
-        if (!tryYourselfMode && videoRef.current) {
-          videoRef.current.play().catch(()=>{});
+        if (!tryYourselfMode) {
+          doPlay();
           setPlaying(true);
           if (!askedTry && markerIdx >= 1 && !inMiniDemo) {
             setAskedTry(true);
@@ -128,49 +168,30 @@ export default function Demo() {
   };
 
   const togglePlay = () => {
-    const v = videoRef.current; if (!v) return;
-    if (v.paused) {
+    if (doIsPaused()) {
       userPausedRef.current = false;
-      v.play().catch(()=>{});
+      doPlay();
       setPlaying(true);
     } else {
       userPausedRef.current = true;
-      v.pause();
+      doPause();
       setPlaying(false);
       voice.stop();
       setActiveNarration(null);
     }
   };
 
-  // Skip to previous/next MARKER (timestamp chapter), not 10s
-  const skipToMarker = (direction) => {
-    const v = videoRef.current; if (!v) return;
+  // Skip forward / backward 10 seconds
+  const skipSeconds = (delta) => {
     voice.stop();
     setActiveNarration(null);
-    if (direction === "next") {
-      const next = markers.find(m => m.timestamp > v.currentTime + 0.2);
-      if (next) {
-        v.currentTime = next.timestamp;
-        const idx = markers.indexOf(next);
-        setMarkerIdx(idx - 1); // so the next marker will trigger when currentTime reaches it
-      } else {
-        v.currentTime = v.duration || 0;
-      }
-    } else {
-      // Previous marker before current
-      let target = null;
-      for (let i = markers.length - 1; i >= 0; i--) {
-        if (markers[i].timestamp < v.currentTime - 1) { target = markers[i]; break; }
-      }
-      if (target) {
-        v.currentTime = target.timestamp;
-        setMarkerIdx(markers.indexOf(target) - 1);
-      } else {
-        v.currentTime = 0;
-        setMarkerIdx(-1);
-      }
-    }
-    if (!userPausedRef.current) v.play().catch(()=>{});
+    const newT = Math.max(0, Math.min(doGetTime() + delta, doGetDuration() || 99999));
+    doSeek(newT);
+    // Recompute markerIdx based on new time
+    let newIdx = -1;
+    for (let i = 0; i < markers.length; i++) if (markers[i].timestamp <= newT) newIdx = i;
+    setMarkerIdx(newIdx);
+    if (!userPausedRef.current) doPlay();
   };
 
   // Jump to specific module (video) in the sequence
@@ -180,7 +201,6 @@ export default function Demo() {
     setActiveNarration(null);
     setVidIdx(idx);
     setMarkerIdx(-1);
-    setTimeout(()=> { if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.play().catch(()=>{}); } }, 200);
   };
 
   const tryYourself = () => {
@@ -301,6 +321,10 @@ export default function Demo() {
                   }}
                   className="bg-white" />
               </div>
+            ) : isYT ? (
+              <div className="absolute inset-0 pointer-events-none" data-testid="yt-wrap">
+                <div ref={ytContainerRef} className="w-full h-full" />
+              </div>
             ) : (
               currentVideo && (
                 <video ref={videoRef} data-testid="demo-video"
@@ -387,14 +411,24 @@ export default function Demo() {
                   <div className="text-xs text-white/80 font-mono w-12">{fmtTime(duration)}</div>
                 </div>
                 <div className="flex items-center gap-1">
-                  <button data-testid="seek-back" onClick={()=>skipToMarker("prev")} title="Previous section"
-                    className="h-9 w-9 rounded-full text-white hover:bg-white/10 grid place-items-center"><SkipBack className="h-4 w-4" /></button>
+                  <button data-testid="seek-back" onClick={()=>skipSeconds(-10)} title="Back 10 seconds"
+                    className="h-10 w-10 rounded-full text-white hover:bg-white/10 grid place-items-center relative">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 2v6h6"/><path d="M3 13a9 9 0 1 0 3-7.7L3 8"/>
+                    </svg>
+                    <span className="absolute text-[9px] font-black mt-0.5">10</span>
+                  </button>
                   <button data-testid="player-play-pause" onClick={togglePlay} title="Play/Pause"
                     className="h-10 w-10 rounded-full bg-white text-slate-950 hover:bg-orange-500 hover:text-white grid place-items-center transition-colors">
                     {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
                   </button>
-                  <button data-testid="seek-fwd" onClick={()=>skipToMarker("next")} title="Next section"
-                    className="h-9 w-9 rounded-full text-white hover:bg-white/10 grid place-items-center"><SkipForward className="h-4 w-4" /></button>
+                  <button data-testid="seek-fwd" onClick={()=>skipSeconds(10)} title="Forward 10 seconds"
+                    className="h-10 w-10 rounded-full text-white hover:bg-white/10 grid place-items-center relative">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 2v6h-6"/><path d="M21 13a9 9 0 1 1-3-7.7L21 8"/>
+                    </svg>
+                    <span className="absolute text-[9px] font-black mt-0.5">10</span>
+                  </button>
                   <div className="flex-1" />
                   <button data-testid="captions-toggle" onClick={()=>setCaptionsOn(c=>!c)} title="Captions"
                     className={`h-9 px-3 rounded-full text-xs font-bold grid place-items-center transition-colors ${captionsOn ? "bg-white text-slate-950" : "text-white hover:bg-white/10 border border-white/20"}`}>
