@@ -37,16 +37,16 @@ export default function Landing() {
       {/* Hero */}
       <section className="relative overflow-hidden bg-grid">
         <div className="absolute inset-0 bg-gradient-to-b from-transparent via-white/30 to-white pointer-events-none" />
-        <div className="relative max-w-7xl mx-auto px-6 lg:px-12 pt-20 pb-16 grid lg:grid-cols-12 gap-12 items-center">
-          <div className="lg:col-span-6 fade-up">
+        <div className="relative max-w-7xl mx-auto px-6 lg:px-12 pt-16 pb-16 grid lg:grid-cols-12 gap-10 items-center">
+          <div className="lg:col-span-5 fade-up">
             <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-orange-50 border border-orange-100 rounded-full text-xs font-bold uppercase tracking-widest text-orange-600 mb-6">
               <Sparkles className="h-3.5 w-3.5" /> AI-guided product tour
             </div>
-            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-black tracking-tight text-slate-950 leading-[1.05]">
+            <h1 className="text-4xl sm:text-5xl lg:text-[3.4rem] xl:text-6xl font-black tracking-tight text-slate-950 leading-[1.05]">
               {t(lang, "headline")}
             </h1>
-            <p className="mt-6 text-lg text-slate-600 max-w-xl leading-relaxed">{t(lang, "subheadline")}</p>
-            <div className="mt-10 flex flex-wrap items-center gap-4">
+            <p className="mt-5 text-base lg:text-lg text-slate-600 max-w-md leading-relaxed">{t(lang, "subheadline")}</p>
+            <div className="mt-8 flex flex-wrap items-center gap-4">
               <Button
                 data-testid="start-demo-btn"
                 onClick={onStart}
@@ -57,7 +57,7 @@ export default function Landing() {
               <span className="text-sm text-slate-500 font-medium">No signup • 2 minutes • 4 languages</span>
             </div>
 
-            <div className="mt-12 grid grid-cols-3 gap-4 max-w-lg">
+            <div className="mt-10 grid grid-cols-3 gap-4 max-w-md">
               {[{i:Zap, t:"AI Narration", d:"Every step explained"},
                 {i:ShieldCheck, t:"GST-ready", d:"GSTR1 · e-Invoice"},
                 {i:Globe, t:"4 Languages", d:"EN · HI · GU · MR"}].map((f,i)=>(
@@ -71,23 +71,34 @@ export default function Landing() {
           </div>
 
           {/* Right: Biziverse product preview */}
-          <div className="lg:col-span-6 relative fade-up">
-            <div className="relative rounded-3xl overflow-hidden shadow-2xl bg-white ring-1 ring-slate-200">
-              <img
-                src="https://biziverse.com/images/Screens/HeroImage.png"
-                alt="Biziverse product"
-                className="w-full h-auto object-cover"
-              />
-              {/* Play indicator */}
-              <button onClick={onStart} aria-label="Start demo"
-                className="absolute inset-0 grid place-items-center group"
-                data-testid="start-demo-hero-btn">
-                <span className="h-20 w-20 rounded-full bg-orange-600 text-white grid place-items-center shadow-2xl shadow-orange-500/40 group-hover:scale-110 transition-transform">
-                  <Play className="h-8 w-8 fill-white ml-1" />
-                </span>
-              </button>
-            </div>
+          <div className="lg:col-span-7 relative fade-up">
+            {/* Decorative offset block */}
+            <div className="absolute -top-4 -right-4 inset-0 bg-orange-100 rounded-3xl hidden md:block" />
+            <div className="absolute -top-10 -left-10 w-40 h-40 bg-amber-200/60 rounded-full blur-3xl" />
 
+            <div className="relative rounded-2xl overflow-hidden shadow-2xl bg-white ring-1 ring-slate-200/80">
+              {/* Browser chrome */}
+              <div className="flex items-center gap-2 px-4 py-3 bg-slate-100 border-b border-slate-200">
+                <span className="h-3 w-3 rounded-full bg-red-400" />
+                <span className="h-3 w-3 rounded-full bg-amber-400" />
+                <span className="h-3 w-3 rounded-full bg-emerald-400" />
+                <div className="ml-3 flex-1 bg-white rounded-md px-3 py-1 text-xs text-slate-400 font-mono">app.biziverse.com</div>
+              </div>
+              <div className="relative">
+                <img
+                  src="https://biziverse.com/images/Screens/HeroImage.png"
+                  alt="Biziverse product"
+                  className="w-full h-auto block"
+                />
+                <button onClick={onStart} aria-label="Start demo"
+                  className="absolute inset-0 grid place-items-center group bg-slate-950/0 hover:bg-slate-950/10 transition-colors"
+                  data-testid="start-demo-hero-btn">
+                  <span className="h-16 w-16 sm:h-20 sm:w-20 rounded-full bg-orange-600 text-white grid place-items-center shadow-2xl shadow-orange-500/40 group-hover:scale-110 transition-transform ring-8 ring-white/40">
+                    <Play className="h-7 w-7 sm:h-8 sm:w-8 fill-white ml-1" />
+                  </span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </section>
