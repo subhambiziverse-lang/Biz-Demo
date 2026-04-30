@@ -382,7 +382,7 @@ async def search_kb(question: str, lang: str):
         if score > best_score:
             best_score = score
             best = e
-    if best and best_score >= 2:
+    if best and best_score >= 1:
         return best
     return None
 
@@ -392,20 +392,54 @@ async def ai_chat(payload: ChatIn):
     kb_hit = await search_kb(payload.message, payload.language)
     base_answer = None
     linked_mini = None
+    matched_module = None
     if kb_hit:
         base_answer = kb_hit.get("answers", {}).get(payload.language) or kb_hit.get("answers", {}).get("en") or ""
         linked_mini = kb_hit.get("linked_mini_demo_id")
 
+    # Module-keyword fallback: if message mentions a known module, find a video for it
+    if not linked_mini:
+        q_lower = payload.message.lower()
+        module_keywords = {
+            "crm": ["crm", "lead", "leads", "inquir", "inquiry"],
+            "quotes": ["quote", "quotation", "proforma"],
+            "sales_orders": ["sales order", "order"],
+            "sales_invoices": ["invoice", "billing", "gst", "e-invoice", "e-way", "tally"],
+            "recovery": ["recovery", "pending", "payment", "collection", "reminder", "overdue"],
+            "inventory": ["inventory", "stock", "batch", "warehouse"],
+            "purchases": ["purchase", "vendor", "grn"],
+            "manufacturing": ["manufactur", "production", "backflush"],
+            "reports": ["report", "dashboard", "analytics"],
+        }
+        for mk, words in module_keywords.items():
+            if any(w in q_lower for w in words):
+                v = await db.module_videos.find_one({"module_key": mk, "published": True}, {"_id": 0})
+                if v:
+                    matched_module = mk
+                    # Create or get a mini-demo for this video on-the-fly
+                    existing_mini = await db.mini_demos.find_one({"module_video_id": v["id"]}, {"_id": 0})
+                    if existing_mini:
+                        linked_mini = existing_mini["id"]
+                    else:
+                        mini_id = f"mini_{uuid.uuid4().hex[:10]}"
+                        await db.mini_demos.insert_one({
+                            "id": mini_id, "name": f"Live: {v['title']}",
+                            "module_video_id": v["id"], "steps": [],
+                            "created_at": datetime.now(timezone.utc).isoformat()
+                        })
+                        linked_mini = mini_id
+                    break
+
     # Build context
     lang_names = {"en": "English", "hi": "Hindi", "gu": "Gujarati", "mr": "Marathi"}
     sys_prompt = (
-        "You are a knowledgeable Biziverse product expert. Biziverse is a business management platform "
+        "You are a knowledgeable Biziverse product expert. Biziverse is a complete business management platform "
         "for Indian wholesale traders, distributors, retailers, manufacturers. "
-        "Answer ONLY in the context of Biziverse features. Be concise (max 60 words). "
-        "Do NOT disparage competitors. "
+        "Answer questions about ANY Biziverse feature or module — not just what the user selected. "
+        "Be helpful, concise (max 60 words). Do NOT disparage competitors. "
         f"Respond in {lang_names.get(payload.language, 'English')}. "
-        f"User business type: {payload.business_type}. Product: {payload.product_category}. "
-        f"Selected modules: {payload.modules}. Current demo step: {payload.current_step}."
+        f"User context (for personalisation only — feel free to discuss other modules too): "
+        f"business={payload.business_type}, sells={payload.product_category}, currently exploring={payload.modules}."
     )
 
     user_msg = payload.message
@@ -423,7 +457,7 @@ async def ai_chat(payload: ChatIn):
         logger.error(f"LLM error: {e}")
         text = base_answer or "I'm having trouble answering right now. Please try again or ask a different question."
 
-    return {"answer": text, "linked_mini_demo_id": linked_mini, "from_kb": bool(kb_hit), "kb_question": kb_hit.get("question") if kb_hit else None}
+    return {"answer": text, "linked_mini_demo_id": linked_mini, "from_kb": bool(kb_hit), "kb_question": kb_hit.get("question") if kb_hit else None, "matched_module": matched_module}
 
 # ========== Signup (Mocked OTP + Razorpay) ==========
 @api.post("/signup/otp/send")

@@ -5,7 +5,7 @@ import { useApp } from "../contexts/AppContext";
 import { t, LANGS } from "../lib/i18n";
 import { voice } from "../lib/voice";
 import api from "../lib/api";
-import { Pause, Play, ExternalLink, RotateCw, Volume2, VolumeX, Send, Sparkles, ArrowLeft, Maximize2, Minimize2, X, MessageCircle } from "lucide-react";
+import { Pause, Play, ExternalLink, Volume2, VolumeX, Send, Sparkles, ArrowLeft, Maximize2, Minimize2, X, MessageCircle, SkipBack, SkipForward, Subtitles } from "lucide-react";
 
 export default function Demo() {
   const nav = useNavigate();
@@ -20,6 +20,9 @@ export default function Demo() {
   const [askedTry, setAskedTry] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
+  const [captionsOn, setCaptionsOn] = useState(true);
+  const [progress, setProgress] = useState(0);
+  const [duration, setDuration] = useState(0);
 
   // Mini-demo state
   const [miniDemoVideo, setMiniDemoVideo] = useState(null);  // when set, plays this instead
@@ -82,6 +85,27 @@ export default function Demo() {
   useEffect(() => {
     if (videoRef.current && playing && !tryYourselfMode) videoRef.current.play().catch(()=>{});
   }, [vidIdx, playing, tryYourselfMode, currentVideo]);
+
+  // Track video time for progress bar
+  useEffect(() => {
+    const v = videoRef.current; if (!v) return;
+    const onTime = () => { setProgress(v.currentTime || 0); };
+    const onMeta = () => { setDuration(v.duration || 0); };
+    v.addEventListener("timeupdate", onTime);
+    v.addEventListener("loadedmetadata", onMeta);
+    return () => { v.removeEventListener("timeupdate", onTime); v.removeEventListener("loadedmetadata", onMeta); };
+  }, [currentVideo]);
+
+  const seekBy = (delta) => {
+    const v = videoRef.current; if (!v) return;
+    v.currentTime = Math.max(0, Math.min((v.currentTime||0) + delta, v.duration||0));
+    voice.stop();
+    setActiveNarration(null);
+    // Reset markers cursor based on new position
+    let newIdx = -1;
+    for (let i=0;i<markers.length;i++) if (markers[i].timestamp <= v.currentTime) newIdx = i;
+    setMarkerIdx(newIdx);
+  };
 
   const triggerMarker = (m) => {
     const v = videoRef.current; if (!v) return;
@@ -224,8 +248,14 @@ export default function Demo() {
         <div className={maximized ? "h-full w-full" : "lg:col-span-8"}>
           <div ref={playerRef} className={`relative bg-black overflow-hidden ${maximized ? "w-full h-full" : "rounded-2xl shadow-2xl border border-slate-200 aspect-video"}`}>
             {tryYourselfMode ? (
-              <iframe data-testid="biziverse-iframe" src="https://biziverse.com" title="Biziverse"
-                className="absolute inset-0 w-full h-full bg-white" />
+              <div className="absolute inset-0 overflow-hidden bg-white">
+                <iframe data-testid="biziverse-iframe" src="https://biziverse.com" title="Biziverse"
+                  style={{
+                    width: "142%", height: "142%",
+                    transform: "scale(0.7)", transformOrigin: "top left", border: 0
+                  }}
+                  className="bg-white" />
+              </div>
             ) : (
               currentVideo && (
                 <video ref={videoRef} data-testid="demo-video"
@@ -248,8 +278,8 @@ export default function Demo() {
             )}
 
             {/* Inline narration caption (over video) */}
-            {activeNarration && !tryYourselfMode && (
-              <div className="absolute left-1/2 -translate-x-1/2 bottom-6 max-w-2xl px-5 py-3 bg-slate-950/85 backdrop-blur-md text-white rounded-2xl shadow-2xl z-30 border border-white/10">
+            {activeNarration && captionsOn && !tryYourselfMode && (
+              <div className="absolute left-1/2 -translate-x-1/2 bottom-20 max-w-2xl px-5 py-3 bg-slate-950/85 backdrop-blur-md text-white rounded-2xl shadow-2xl z-30 border border-white/10">
                 <div className="flex items-start gap-2">
                   <div className="h-6 w-6 rounded-full bg-orange-600 grid place-items-center flex-shrink-0 mt-0.5"><Sparkles className="h-3 w-3" /></div>
                   <div className="text-sm leading-relaxed">{activeNarration.text}</div>
@@ -257,22 +287,32 @@ export default function Demo() {
               </div>
             )}
 
-            {/* Mini-demo "Return to demo" button */}
-            {inMiniDemo && !tryYourselfMode && (
-              <div className="absolute top-4 left-4 z-30">
-                <Button data-testid="exit-mini-demo" onClick={exitMiniDemo} className="bg-white text-secondary hover:bg-slate-100 rounded-full font-bold shadow-lg">
-                  <ArrowLeft className="h-4 w-4 mr-2" /> Return to Demo
-                </Button>
+            {/* Module chip top-center */}
+            {!tryYourselfMode && currentVideo && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30">
+                <div className="px-4 py-1.5 bg-slate-950/70 backdrop-blur-md text-white rounded-full text-xs font-bold tracking-wider uppercase border border-white/10 flex items-center gap-2">
+                  <span className="h-1.5 w-1.5 rounded-full bg-orange-500 animate-pulse" />
+                  {inMiniDemo ? "Mini-demo · " : ""}{currentVideo.title}
+                </div>
               </div>
             )}
 
-            {/* Try Yourself "Return to Demo" button */}
+            {/* Mini-demo "Return to demo" — icon-only, transparent */}
+            {inMiniDemo && !tryYourselfMode && (
+              <button data-testid="exit-mini-demo" onClick={exitMiniDemo}
+                title="Return to demo"
+                className="absolute top-4 left-4 z-30 h-10 w-10 rounded-full bg-slate-950/40 hover:bg-slate-950/70 backdrop-blur-md text-white grid place-items-center border border-white/10 transition-colors">
+                <ArrowLeft className="h-4 w-4" />
+              </button>
+            )}
+
+            {/* Try Yourself "Return to Demo" — icon-only, transparent */}
             {tryYourselfMode && (
-              <div className="absolute top-4 left-4 z-30">
-                <Button data-testid="exit-try-yourself" onClick={exitTryYourself} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full font-bold shadow-lg">
-                  <ArrowLeft className="h-4 w-4 mr-2" /> Return to Demo
-                </Button>
-              </div>
+              <button data-testid="exit-try-yourself" onClick={exitTryYourself}
+                title="Return to demo"
+                className="absolute top-4 left-4 z-30 h-10 w-10 rounded-full bg-orange-600/80 hover:bg-orange-600 backdrop-blur-md text-white grid place-items-center border border-white/20 shadow-lg transition-colors">
+                <ArrowLeft className="h-4 w-4" />
+              </button>
             )}
 
             {/* Maximize / Minimize */}
@@ -290,25 +330,45 @@ export default function Demo() {
                 </div>
               </div>
             )}
+
+            {/* Custom video controls bar (bottom) */}
+            {!tryYourselfMode && currentVideo && (
+              <div className="absolute bottom-0 left-0 right-0 px-4 py-3 bg-gradient-to-t from-slate-950/85 to-transparent z-30 backdrop-blur-sm">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="text-xs text-white/80 font-mono w-12 text-right">{fmtTime(progress)}</div>
+                  <div className="flex-1 h-1.5 bg-white/20 rounded-full overflow-hidden cursor-pointer"
+                    onClick={(e)=>{ const r=e.currentTarget.getBoundingClientRect(); const p=(e.clientX-r.left)/r.width; if (videoRef.current) videoRef.current.currentTime = p * (duration||0); }}>
+                    <div className="h-full bg-orange-500" style={{ width: `${duration ? (progress/duration)*100 : 0}%` }} />
+                  </div>
+                  <div className="text-xs text-white/80 font-mono w-12">{fmtTime(duration)}</div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button data-testid="seek-back" onClick={()=>seekBy(-10)} title="-10 seconds"
+                    className="h-9 w-9 rounded-full text-white hover:bg-white/10 grid place-items-center"><SkipBack className="h-4 w-4" /></button>
+                  <button data-testid="player-play-pause" onClick={togglePlay} title="Play/Pause"
+                    className="h-10 w-10 rounded-full bg-white text-slate-950 hover:bg-orange-500 hover:text-white grid place-items-center transition-colors">
+                    {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
+                  </button>
+                  <button data-testid="seek-fwd" onClick={()=>seekBy(10)} title="+10 seconds"
+                    className="h-9 w-9 rounded-full text-white hover:bg-white/10 grid place-items-center"><SkipForward className="h-4 w-4" /></button>
+                  <div className="flex-1" />
+                  <button data-testid="captions-toggle" onClick={()=>setCaptionsOn(c=>!c)} title="Captions"
+                    className={`h-9 px-3 rounded-full text-xs font-bold grid place-items-center transition-colors ${captionsOn ? "bg-white text-slate-950" : "text-white hover:bg-white/10 border border-white/20"}`}>
+                    <div className="flex items-center gap-1.5"><Subtitles className="h-3.5 w-3.5" /> CC</div>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* Player controls — hide when maximized */}
-          {!maximized && (
+          {/* Player controls (Try Yourself) — hide when maximized */}
+          {!maximized && !tryYourselfMode && !inMiniDemo && (
             <div className="mt-4 flex flex-wrap items-center gap-3">
-              {!tryYourselfMode && (
-                <Button data-testid="play-pause" onClick={togglePlay} variant="outline" className="rounded-full">
-                  {playing ? <><Pause className="h-4 w-4 mr-2" /> {t(lang,"pause")}</> : <><Play className="h-4 w-4 mr-2" /> {t(lang,"play")}</>}
-                </Button>
-              )}
-              {!tryYourselfMode && !inMiniDemo && (
-                <Button data-testid="try-yourself" onClick={tryYourself} className="bg-secondary hover:bg-secondary/90 text-white rounded-full">
-                  <ExternalLink className="h-4 w-4 mr-2" /> {t(lang,"try_yourself")}
-                </Button>
-              )}
+              <Button data-testid="try-yourself" onClick={tryYourself} className="bg-secondary hover:bg-secondary/90 text-white rounded-full">
+                <ExternalLink className="h-4 w-4 mr-2" /> {t(lang,"try_yourself")}
+              </Button>
               <div className="flex-1" />
-              <div className="text-sm text-slate-500">
-                {inMiniDemo ? "Mini-demo" : `Step ${vidIdx+1} of ${videos.length}`}
-              </div>
+              <div className="text-sm text-slate-500">Step {vidIdx+1} of {videos.length}</div>
             </div>
           )}
         </div>
@@ -346,6 +406,12 @@ export default function Demo() {
       </main>
     </div>
   );
+}
+
+function fmtTime(s) {
+  if (!s || isNaN(s)) return "0:00";
+  const m = Math.floor(s/60), sec = Math.floor(s%60);
+  return `${m}:${sec.toString().padStart(2,"0")}`;
 }
 
 function ChatHeader({ lang }) {
