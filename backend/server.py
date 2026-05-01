@@ -130,13 +130,15 @@ class VideoMarker(BaseModel):
     narration: Dict[str, str] = {}  # lang -> text
 
 class ModuleVideoIn(BaseModel):
+    model_config = {"extra": "allow"}
     module_key: str
     title: str
     video_url: str = ""
     storage_path: str = ""
     duration: float = 0
-    markers: List[VideoMarker] = []
+    markers: List[Dict[str, Any]] = []
     published: bool = False
+    biziverse_url: Optional[str] = None
 
 class FlowIn(BaseModel):
     business_type: str

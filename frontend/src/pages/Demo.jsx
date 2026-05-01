@@ -58,6 +58,26 @@ export default function Demo() {
   const inMiniDemo = !!miniDemoVideo;
 
   const isYT = isYouTube(currentVideo?.video_url || "");
+  const currentMarker = markerIdx >= 0 ? markers[markerIdx] : null;
+  // Marker is "active" (showing highlight + cursor) only while between its timestamp and end_time
+  const activeMarker = currentMarker && (currentMarker.end_time == null || progress <= currentMarker.end_time + 0.2) ? currentMarker : null;
+
+  // Compute biziverse_url for try-yourself based on current marker (admin-configurable per-marker)
+  const biziverseUrl = (currentMarker && currentMarker.biziverse_url) || currentVideo?.biziverse_url || "https://biziverse.com";
+
+  // Apply voice toggle to video audio (not TTS)
+  useEffect(() => {
+    if (isYT && ytPlayerRef.current) {
+      try {
+        if (voiceOn) ytPlayerRef.current.unMute?.(); else ytPlayerRef.current.mute?.();
+      } catch(e) {}
+    }
+    if (!isYT && videoRef.current) {
+      videoRef.current.muted = !voiceOn;
+    }
+    // Also disable TTS entirely to respect "only video audio"
+    voice.setEnabled(false);
+  }, [voiceOn, isYT, currentVideo?.id]);
 
   // Player abstraction — works for both HTML5 video and YouTube
   const doPlay = () => { isYT ? ytPlayerRef.current?.playVideo?.() : videoRef.current?.play().catch(()=>{}); };
@@ -153,23 +173,21 @@ export default function Demo() {
     doPause();
     const text = m.narration?.[lang] || m.narration?.en || "";
     setActiveNarration({ text, marker: m });
-    voice.speak(text, lang, () => {
-      const wait = (m.pause_duration || 0) * 1000;
-      setTimeout(() => {
-        setActiveNarration(null);
-        if (userPausedRef.current) return;
-        if (!tryYourselfMode) {
-          doPlay();
-          setPlaying(true);
-          if (!askedTry && markerIdx >= 1 && !inMiniDemo) {
-            setAskedTry(true);
-            const askText = t(lang, "want_try");
-            setChat(c => [...c, { role: "ai", text: askText, prompt: "want_try" }]);
-            voice.speak(askText, lang);
-          }
+    // Show caption for the configured pause_duration, then auto-resume (no TTS — user wants only video audio)
+    const wait = Math.max((m.pause_duration || 3) * 1000, 1000);
+    setTimeout(() => {
+      setActiveNarration(null);
+      if (userPausedRef.current) return;
+      if (!tryYourselfMode) {
+        doPlay();
+        setPlaying(true);
+        if (!askedTry && markerIdx >= 1 && !inMiniDemo) {
+          setAskedTry(true);
+          const askText = t(lang, "want_try");
+          setChat(c => [...c, { role: "ai", text: askText, prompt: "want_try" }]);
         }
-      }, Math.max(wait, 200));
-    });
+      }
+    }, wait);
   };
 
   const togglePlay = () => {
@@ -209,13 +227,18 @@ export default function Demo() {
   };
 
   const tryYourself = () => {
-    setTryYourselfMode(true); voice.stop(); videoRef.current?.pause();
+    // Cleanup YT player before switching to iframe mode to avoid removeChild errors
+    if (ytPlayerRef.current) {
+      try { ytPlayerRef.current.pauseVideo?.(); } catch(e){}
+    }
+    voice.stop();
+    setTryYourselfMode(true);
     trackEvent("interactive_mode_entered");
   };
   const exitTryYourself = () => {
     setTryYourselfMode(false);
     setPlaying(true);
-    setTimeout(()=> videoRef.current?.play().catch(()=>{}), 200);
+    setTimeout(()=> doPlay(), 200);
     trackEvent("demo_resumed");
   };
 
@@ -267,9 +290,8 @@ export default function Demo() {
         setPendingMini({ mini_id: linkedMini, topic: q });
         setChat(c => [...c, { role: "ai", text: "Want me to show you how this works?", prompt: "show_me", mini_id: linkedMini, topic: q }]);
       }
-      voice.speak(ans, lang, () => {
-        if (!tryYourselfMode && playing && !linkedMini) videoRef.current?.play().catch(()=>{});
-      });
+      // No TTS — user wants only video audio. Resume video.
+      if (!tryYourselfMode && playing && !linkedMini) doPlay();
     } catch (e) {
       setChat(c => [...c, { role: "ai", text: "I'm having trouble answering right now. Please try again." }]);
     }
@@ -282,7 +304,6 @@ export default function Demo() {
     if (!tryYourselfMode && playing) videoRef.current?.play().catch(()=>{});
   };
 
-  const currentMarker = markerIdx >= 0 ? markers[markerIdx] : null;
   const transitionLabel = videos[vidIdx + 1]?.title || "";
 
   // Layout: when maximized, full-screen video + floating chat. Otherwise split layout.
@@ -304,8 +325,8 @@ export default function Demo() {
               <select data-testid="demo-lang-select" value={lang} onChange={e=>setLang(e.target.value)} className="text-sm border border-slate-200 rounded-full px-3 py-1.5 bg-white">
                 {LANGS.map(l=><option key={l.code} value={l.code}>{l.native}</option>)}
               </select>
-              <Button data-testid="voice-toggle" variant="outline" size="sm" onClick={()=>{ setVoiceOn(v => { const nv = !v; voice.setEnabled(nv); if (!nv) voice.stop(); return nv; }); }}>
-                {voiceOn ? <Volume2 className="h-4 w-4 mr-1.5" /> : <VolumeX className="h-4 w-4 mr-1.5" />} {t(lang, voiceOn?"voice_on":"voice_off")}
+              <Button data-testid="voice-toggle" variant="outline" size="sm" onClick={()=>setVoiceOn(v=>!v)}>
+                {voiceOn ? <Volume2 className="h-4 w-4 mr-1.5" /> : <VolumeX className="h-4 w-4 mr-1.5" />} {voiceOn ? "Sound On" : "Muted"}
               </Button>
               <Button data-testid="end-demo" variant="ghost" size="sm" onClick={()=>{ voice.stop(); setEndFlow("choose"); }}>End demo</Button>
             </div>
@@ -317,38 +338,42 @@ export default function Demo() {
         {/* Video / Iframe column */}
         <div className={maximized ? "h-full w-full" : "lg:col-span-8"}>
           <div ref={playerRef} className={`relative bg-black overflow-hidden ${maximized ? "w-full h-full" : "rounded-2xl shadow-2xl border border-slate-200 aspect-video"}`}>
+            {/* YT player ALWAYS mounted (hidden during try-yourself) to avoid React removeChild on YT-managed iframe */}
+            {isYT && !tryYourselfMode && (
+              <div className="absolute inset-0 pointer-events-none" data-testid="yt-wrap">
+                <div ref={ytContainerRef} className="w-full h-full" />
+              </div>
+            )}
+            {isYT && tryYourselfMode && (
+              <div style={{display:"none"}}><div ref={ytContainerRef} /></div>
+            )}
+
             {tryYourselfMode ? (
-              <div className="absolute inset-0 overflow-hidden bg-white">
-                <iframe data-testid="biziverse-iframe" src="https://biziverse.com" title="Biziverse"
+              <div className="absolute inset-0 overflow-hidden bg-white z-10">
+                <iframe data-testid="biziverse-iframe" src={biziverseUrl} title="Biziverse"
                   style={{
                     width: "142%", height: "142%",
                     transform: "scale(0.7)", transformOrigin: "top left", border: 0
                   }}
                   className="bg-white" />
               </div>
-            ) : isYT ? (
-              <div className="absolute inset-0 pointer-events-none" data-testid="yt-wrap">
-                <div ref={ytContainerRef} className="w-full h-full" />
-              </div>
-            ) : (
-              currentVideo && (
-                <video ref={videoRef} data-testid="demo-video"
-                  src={currentVideo.video_url}
-                  className="w-full h-full object-cover" playsInline autoPlay muted preload="auto" />
-              )
+            ) : !isYT && currentVideo && (
+              <video ref={videoRef} data-testid="demo-video"
+                src={currentVideo.video_url}
+                className="w-full h-full object-cover" playsInline autoPlay preload="auto" />
             )}
 
             {/* Highlight overlay */}
-            {currentMarker?.highlight && !tryYourselfMode && (
+            {activeMarker?.highlight && !tryYourselfMode && (
               <div className="demo-highlight" style={{
-                left: `${currentMarker.highlight.x}%`, top: `${currentMarker.highlight.y}%`,
-                width: `${currentMarker.highlight.w}%`, height: `${currentMarker.highlight.h}%`,
-                borderRadius: currentMarker.highlight.shape === "circle" ? "50%" : "12px"
+                left: `${activeMarker.highlight.x}%`, top: `${activeMarker.highlight.y}%`,
+                width: `${activeMarker.highlight.w}%`, height: `${activeMarker.highlight.h}%`,
+                borderRadius: activeMarker.highlight.shape === "circle" ? "50%" : "12px"
               }} />
             )}
             {/* Cursor */}
-            {currentMarker?.cursor && !tryYourselfMode && (
-              <div className="demo-cursor" style={{ left: `${currentMarker.cursor.x}%`, top: `${currentMarker.cursor.y}%` }} />
+            {activeMarker?.cursor && !tryYourselfMode && (
+              <div className="demo-cursor" style={{ left: `${activeMarker.cursor.x}%`, top: `${activeMarker.cursor.y}%` }} />
             )}
 
             {/* Inline narration caption (over video) */}
@@ -409,8 +434,8 @@ export default function Demo() {
               <div className="absolute bottom-0 left-0 right-0 px-4 py-3 bg-gradient-to-t from-slate-950/85 to-transparent z-30 backdrop-blur-sm">
                 <div className="flex items-center gap-2 mb-2">
                   <div className="text-xs text-white/80 font-mono w-12 text-right">{fmtTime(progress)}</div>
-                  <div className="flex-1 h-1.5 bg-white/20 rounded-full overflow-hidden cursor-pointer"
-                    onClick={(e)=>{ const r=e.currentTarget.getBoundingClientRect(); const p=(e.clientX-r.left)/r.width; if (videoRef.current) videoRef.current.currentTime = p * (duration||0); }}>
+                  <div className="flex-1 h-1.5 bg-white/20 rounded-full overflow-hidden cursor-pointer hover:h-2 transition-all"
+                    onClick={(e)=>{ const r=e.currentTarget.getBoundingClientRect(); const p=(e.clientX-r.left)/r.width; doSeek(p * (duration||0)); }}>
                     <div className="h-full bg-orange-500" style={{ width: `${duration ? (progress/duration)*100 : 0}%` }} />
                   </div>
                   <div className="text-xs text-white/80 font-mono w-12">{fmtTime(duration)}</div>
