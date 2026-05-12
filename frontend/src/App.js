@@ -25,6 +25,7 @@ import QuizOptionsPage from "./pages/admin/QuizOptionsPage";
 import AnalyticsPage from "./pages/admin/AnalyticsPage";
 import UnansweredPage from "./pages/admin/UnansweredPage";
 import SettingsPage from "./pages/admin/SettingsPage";
+import LanguagesPage from "./pages/admin/LanguagesPage";
 
 function Router() {
   const location = useLocation();
@@ -50,6 +51,7 @@ function Router() {
         <Route path="coverage" element={<CoveragePage />} />
         <Route path="kb" element={<KBPage />} />
         <Route path="quiz-options" element={<QuizOptionsPage />} />
+        <Route path="languages" element={<LanguagesPage />} />
         <Route path="analytics" element={<AnalyticsPage />} />
         <Route path="unanswered" element={<UnansweredPage />} />
         <Route path="settings" element={<SettingsPage />} />

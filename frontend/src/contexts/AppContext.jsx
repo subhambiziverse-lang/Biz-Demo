@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import api from "../lib/api";
+import { loadLanguages, onLanguagesChange, LANGS } from "../lib/i18n";
 
 const Ctx = createContext(null);
 
@@ -19,6 +20,7 @@ export function AppProvider({ children }) {
   const [sessionId, setSessionId] = useState(localStorage.getItem("biz_sid") || null);
   const [quiz, setQuiz] = useState(null);
   const [demoData, setDemoData] = useState(null);
+  const [languagesVersion, setLanguagesVersion] = useState(0); // bump to force re-renders
 
   const setLang = (l) => { localStorage.setItem("biz_lang", l); setLangState(l); };
 
@@ -38,8 +40,15 @@ export function AppProvider({ children }) {
 
   useEffect(() => { if (!sessionId) startSession(); /* eslint-disable-next-line */ }, []);
 
+  // Load dynamic languages from backend at boot
+  useEffect(() => {
+    loadLanguages().then(() => setLanguagesVersion(v => v + 1));
+    const off = onLanguagesChange(() => setLanguagesVersion(v => v + 1));
+    return off;
+  }, []);
+
   return (
-    <Ctx.Provider value={{ lang, setLang, voiceOn, setVoiceOn, sessionId, startSession, trackEvent, quiz, setQuiz, demoData, setDemoData }}>
+    <Ctx.Provider value={{ lang, setLang, voiceOn, setVoiceOn, sessionId, startSession, trackEvent, quiz, setQuiz, demoData, setDemoData, languagesVersion, availableLanguages: LANGS }}>
       {children}
     </Ctx.Provider>
   );

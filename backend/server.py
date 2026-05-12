@@ -152,6 +152,7 @@ class ModuleVideoIn(BaseModel):
     target_languages: List[str] = []        # empty = all
     target_business_types: List[str] = []   # empty = all
     target_product_categories: List[str] = []  # empty = all
+    primary_language: Optional[str] = None  # e.g., "hi" — used to enable YT auto-translate captions when user picks different lang
 
 class FlowIn(BaseModel):
     business_type: str
@@ -233,40 +234,68 @@ async def logout(response: Response, session_token: Optional[str] = Cookie(None)
 DEFAULT_QUIZ = {
     "business_types": [
         {"key": "wholesale", "label": {"en": "Wholesale Trader", "hi": "थोक व्यापारी", "gu": "જથ્થાબંધ વેપારી", "mr": "घाऊक व्यापारी"}},
-        {"key": "distributor", "label": {"en": "Distributor", "hi": "वितरक", "gu": "વિતરક", "mr": "वितरक"}},
+        {"key": "distributor", "label": {"en": "Distributor", "hi": "वितरक / डीलर", "gu": "વિતરક / ડીલર", "mr": "वितरक / डीलर"}},
         {"key": "retail", "label": {"en": "Retail Store", "hi": "खुदरा दुकान", "gu": "છૂટક દુકાન", "mr": "किरकोळ दुकान"}},
-        {"key": "manufacturer", "label": {"en": "Manufacturer", "hi": "निर्माता", "gu": "ઉત્પાદક", "mr": "उत्पादक"}},
+        {"key": "manufacturer", "label": {"en": "Manufacturer", "hi": "निर्माता / उत्पादक", "gu": "ઉત્પાદક", "mr": "उत्पादक"}},
         {"key": "service", "label": {"en": "Service Provider", "hi": "सेवा प्रदाता", "gu": "સેવા પ્રદાતા", "mr": "सेवा प्रदाता"}},
         {"key": "ecom", "label": {"en": "E-commerce Seller", "hi": "ई-कॉमर्स विक्रेता", "gu": "ઈ-કોમર્સ વિક્રેતા", "mr": "ई-कॉमर्स विक्रेता"}},
         {"key": "contractor", "label": {"en": "Contractor", "hi": "ठेकेदार", "gu": "કોન્ટ્રાક્ટર", "mr": "कंत्राटदार"}},
     ],
     "product_categories": {
-        "wholesale": [{"key": "textiles", "label": {"en": "Textiles & Apparel"}},
-                      {"key": "electronics", "label": {"en": "Electronics"}},
-                      {"key": "fmcg", "label": {"en": "FMCG / Groceries"}},
-                      {"key": "hardware", "label": {"en": "Hardware & Tools"}},
-                      {"key": "other_w", "label": {"en": "Other"}}],
-        "distributor": [{"key": "fmcg", "label": {"en": "FMCG"}},
-                        {"key": "pharma", "label": {"en": "Pharma"}},
-                        {"key": "auto", "label": {"en": "Auto Parts"}},
-                        {"key": "other_d", "label": {"en": "Other"}}],
-        "retail": [{"key": "kirana", "label": {"en": "Kirana / Grocery"}},
-                   {"key": "fashion", "label": {"en": "Fashion"}},
-                   {"key": "mobile", "label": {"en": "Mobile & Electronics"}},
-                   {"key": "other_r", "label": {"en": "Other"}}],
-        "manufacturer": [{"key": "engineering", "label": {"en": "Engineering"}},
-                         {"key": "food", "label": {"en": "Food Processing"}},
-                         {"key": "chemicals", "label": {"en": "Chemicals"}},
-                         {"key": "other_m", "label": {"en": "Other"}}],
-        "service": [{"key": "it", "label": {"en": "IT Services"}},
-                    {"key": "consulting", "label": {"en": "Consulting"}},
-                    {"key": "other_s", "label": {"en": "Other"}}],
-        "ecom": [{"key": "fashion_e", "label": {"en": "Fashion"}},
-                 {"key": "electronics_e", "label": {"en": "Electronics"}},
-                 {"key": "other_e", "label": {"en": "Other"}}],
-        "contractor": [{"key": "construction", "label": {"en": "Construction"}},
-                       {"key": "interior", "label": {"en": "Interior"}},
-                       {"key": "other_c", "label": {"en": "Other"}}],
+        "wholesale": [
+            {"key": "textiles", "label": {"en": "Textiles & Apparel", "hi": "कपड़ा एवं वस्त्र", "gu": "કાપડ અને વસ્ત્ર", "mr": "कापड व वस्त्र"}},
+            {"key": "electronics", "label": {"en": "Electronics", "hi": "इलेक्ट्रॉनिक्स", "gu": "ઇલેક્ટ્રોનિક્સ", "mr": "इलेक्ट्रॉनिक्स"}},
+            {"key": "fmcg", "label": {"en": "FMCG / Groceries", "hi": "FMCG / किराना", "gu": "FMCG / કરિયાણા", "mr": "FMCG / किराणा"}},
+            {"key": "hardware", "label": {"en": "Hardware & Tools", "hi": "हार्डवेयर एवं औज़ार", "gu": "હાર્ડવેર અને ઓજારો", "mr": "हार्डवेअर व साधने"}},
+            {"key": "stationery", "label": {"en": "Stationery & Books", "hi": "स्टेशनरी एवं किताबें", "gu": "સ્ટેશનરી અને પુસ્તકો", "mr": "स्टेशनरी व पुस्तके"}},
+            {"key": "other_w", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+        ],
+        "distributor": [
+            {"key": "fmcg", "label": {"en": "FMCG", "hi": "FMCG", "gu": "FMCG", "mr": "FMCG"}},
+            {"key": "pharma", "label": {"en": "Pharma & Healthcare", "hi": "दवाइयाँ / फार्मा", "gu": "ફાર્મા / દવા", "mr": "फार्मा / औषध"}},
+            {"key": "auto", "label": {"en": "Auto Parts & Spares", "hi": "ऑटो पार्ट्स", "gu": "ઓટો સ્પેર પાર્ટ્સ", "mr": "ऑटो स्पेअर्स"}},
+            {"key": "electronics_d", "label": {"en": "Consumer Electronics", "hi": "इलेक्ट्रॉनिक्स", "gu": "ઇલેક્ટ્રોનિક્સ", "mr": "इलेक्ट्रॉनिक्स"}},
+            {"key": "agri_inputs", "label": {"en": "Agri Inputs (Seed, Fertiliser)", "hi": "कृषि सामग्री (बीज, खाद)", "gu": "કૃષિ સામગ્રી (બીજ, ખાતર)", "mr": "कृषी निविष्ठा (बी-बियाणे, खते)"}},
+            {"key": "other_d", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+        ],
+        "retail": [
+            {"key": "kirana", "label": {"en": "Kirana / Grocery", "hi": "किराना / जनरल स्टोर", "gu": "કિરાણા / જનરલ સ્ટોર", "mr": "किराणा / जनरल स्टोअर"}},
+            {"key": "fashion", "label": {"en": "Fashion & Apparel", "hi": "फैशन / कपड़े", "gu": "ફેશન / કપડાં", "mr": "फॅशन / कपडे"}},
+            {"key": "mobile", "label": {"en": "Mobile & Electronics", "hi": "मोबाइल / इलेक्ट्रॉनिक्स", "gu": "મોબાઈલ / ઇલેક્ટ્રોનિક્સ", "mr": "मोबाईल / इलेक्ट्रॉनिक्स"}},
+            {"key": "medical", "label": {"en": "Medical Store / Pharmacy", "hi": "मेडिकल स्टोर", "gu": "મેડિકલ સ્ટોર", "mr": "मेडिकल स्टोअर"}},
+            {"key": "jewellery", "label": {"en": "Jewellery", "hi": "जेवर / आभूषण", "gu": "ઝવેરાત", "mr": "दागिने"}},
+            {"key": "other_r", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+        ],
+        "manufacturer": [
+            {"key": "engineering", "label": {"en": "Engineering / Fabrication", "hi": "इंजीनियरिंग / फैब्रिकेशन", "gu": "એન્જિનિયરિંગ / ફેબ્રિકેશન", "mr": "इंजिनीअरिंग / फॅब्रिकेशन"}},
+            {"key": "food", "label": {"en": "Food Processing", "hi": "खाद्य प्रसंस्करण", "gu": "ફૂડ પ્રોસેસિંગ", "mr": "अन्न प्रक्रिया"}},
+            {"key": "chemicals", "label": {"en": "Chemicals", "hi": "रसायन", "gu": "રસાયણ", "mr": "रसायने"}},
+            {"key": "pharma_m", "label": {"en": "Pharma Manufacturing", "hi": "फार्मा निर्माण", "gu": "ફાર્મા ઉત્પાદન", "mr": "फार्मा उत्पादन"}},
+            {"key": "textile_m", "label": {"en": "Textile / Garment", "hi": "टेक्सटाइल / गारमेंट", "gu": "ટેક્સટાઇલ / ગારમેન્ટ", "mr": "टेक्सटाइल / गारमेंट"}},
+            {"key": "plastic", "label": {"en": "Plastic / Packaging", "hi": "प्लास्टिक / पैकेजिंग", "gu": "પ્લાસ્ટિક / પેકેજિંગ", "mr": "प्लास्टिक / पॅकेजिंग"}},
+            {"key": "other_m", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+        ],
+        "service": [
+            {"key": "it", "label": {"en": "IT Services / Software", "hi": "IT सेवा / सॉफ्टवेयर", "gu": "IT સેવા / સોફ્ટવેર", "mr": "IT सेवा / सॉफ्टवेअर"}},
+            {"key": "consulting", "label": {"en": "Consulting / Professional", "hi": "कंसल्टिंग / प्रोफेशनल", "gu": "કન્સલ્ટિંગ / પ્રોફેશનલ", "mr": "कन्सल्टिंग / प्रोफेशनल"}},
+            {"key": "logistics", "label": {"en": "Logistics / Transport", "hi": "लॉजिस्टिक्स / ट्रांसपोर्ट", "gu": "લોજિસ્ટિક્સ / ટ્રાન્સપોર્ટ", "mr": "लॉजिस्टिक्स / वाहतूक"}},
+            {"key": "education", "label": {"en": "Education / Training", "hi": "शिक्षा / ट्रेनिंग", "gu": "શિક્ષણ / તાલીમ", "mr": "शिक्षण / प्रशिक्षण"}},
+            {"key": "hospitality", "label": {"en": "Hospitality / Restaurant", "hi": "हॉस्पिटैलिटी / रेस्तरां", "gu": "હોસ્પિટાલિટી / રેસ્ટોરન્ટ", "mr": "हॉस्पिटॅलिटी / रेस्टॉरंट"}},
+            {"key": "other_s", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+        ],
+        "ecom": [
+            {"key": "fashion_e", "label": {"en": "Fashion & Apparel", "hi": "फैशन / कपड़े", "gu": "ફેશન / કપડાં", "mr": "फॅशन / कपडे"}},
+            {"key": "electronics_e", "label": {"en": "Electronics & Gadgets", "hi": "इलेक्ट्रॉनिक्स / गैजेट्स", "gu": "ઇલેક્ટ્રોનિક્સ / ગેજેટ્સ", "mr": "इलेक्ट्रॉनिक्स / गॅजेट्स"}},
+            {"key": "home_e", "label": {"en": "Home & Kitchen", "hi": "होम / किचन", "gu": "ઘર / કિચન", "mr": "घर / स्वयंपाकघर"}},
+            {"key": "beauty_e", "label": {"en": "Beauty & Personal Care", "hi": "ब्यूटी / पर्सनल केयर", "gu": "બ્યુટી / પર્સનલ કેર", "mr": "ब्युटी / पर्सनल केअर"}},
+            {"key": "other_e", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+        ],
+        "contractor": [
+            {"key": "construction", "label": {"en": "Construction / Civil", "hi": "निर्माण / सिविल", "gu": "બાંધકામ / સિવિલ", "mr": "बांधकाम / सिव्हिल"}},
+            {"key": "interior", "label": {"en": "Interior / Fit-out", "hi": "इंटीरियर / फिट-आउट", "gu": "ઈન્ટિરિયર / ફિટ-આઉટ", "mr": "इंटिरियर / फिट-आऊट"}},
+            {"key": "electrical_c", "label": {"en": "Electrical / Plumbing", "hi": "इलेक्ट्रिकल / प्लंबिंग", "gu": "ઇલેક્ટ્રિકલ / પ્લમ્બિંગ", "mr": "इलेक्ट्रिकल / प्लंबिंग"}},
+            {"key": "other_c", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+        ],
     },
     "modules": {
         "_default": ["crm", "quotes", "sales_orders", "sales_invoices", "recovery", "contracts",
@@ -275,26 +304,48 @@ DEFAULT_QUIZ = {
     }
 }
 
-MODULE_LABELS = {
-    "crm": {"en": "Manage Inquiries / Leads (CRM)", "hi": "CRM / लीड्स", "gu": "CRM / લીડ્સ", "mr": "CRM / लीड्स"},
-    "quotes": {"en": "Quotes & Proforma Invoice", "hi": "कोटेशन"},
-    "sales_orders": {"en": "Sales Orders"},
-    "sales_invoices": {"en": "Sales Invoices (GST, e-Invoice, e-Way Bill, DC)"},
-    "recovery": {"en": "Recovery (Payment Tracking & Reminders)"},
-    "contracts": {"en": "Contracts (AMC & Renewals)"},
-    "tickets": {"en": "Support Tickets"},
-    "customers": {"en": "Customer Master"},
-    "accounts": {"en": "Accounts"},
-    "purchases": {"en": "Purchases (Invoice, GRN, GSTR3)"},
-    "purchase_orders": {"en": "Purchase Orders"},
-    "inventory": {"en": "Inventory (Batch-wise)"},
-    "manufacturing": {"en": "Manufacturing (Backflush, Job)"},
-    "projects": {"en": "Projects"},
-    "tasks": {"en": "Tasks"},
-    "suppliers": {"en": "Suppliers Master"},
-    "store": {"en": "Your Store (Webstore)"},
-    "reports": {"en": "Reports"},
+DEFAULT_MODULE_LABELS = {
+    "crm": {"en": "Leads & CRM", "hi": "लीड्स / CRM", "gu": "લીડ્સ / CRM", "mr": "लीड्स / CRM"},
+    "quotes": {"en": "Quotes & Proforma Invoice", "hi": "कोटेशन / प्रोफार्मा", "gu": "ક્વોટેશન / પ્રોફોર્મા", "mr": "कोटेशन / प्रोफॉर्मा"},
+    "sales_orders": {"en": "Sales Orders", "hi": "बिक्री ऑर्डर", "gu": "વેચાણ ઓર્ડર", "mr": "विक्री ऑर्डर"},
+    "sales_invoices": {"en": "Sales Invoice (GST, e-Invoice, e-Way Bill)", "hi": "बिक्री चालान (GST, e-Invoice, e-Way Bill)", "gu": "વેચાણ ઇન્વોઇસ (GST, e-Invoice)", "mr": "विक्री इन्व्हॉइस (GST, e-Invoice)"},
+    "recovery": {"en": "Payment Recovery & Reminders", "hi": "बकाया वसूली / रिमाइंडर", "gu": "પેમેન્ટ રિકવરી / રિમાઇન્ડર", "mr": "वसुली / रिमाइंडर"},
+    "contracts": {"en": "Contracts (AMC & Renewals)", "hi": "कॉन्ट्रैक्ट (AMC / रिन्यूअल)", "gu": "કોન્ટ્રાક્ટ (AMC / રિન્યુઅલ)", "mr": "कॉन्ट्रॅक्ट (AMC / नूतनीकरण)"},
+    "tickets": {"en": "Support Tickets", "hi": "सपोर्ट टिकट", "gu": "સપોર્ટ ટિકિટ", "mr": "सपोर्ट तिकीट"},
+    "customers": {"en": "Customer Master", "hi": "ग्राहक मास्टर", "gu": "ગ્રાહક માસ્ટર", "mr": "ग्राहक मास्टर"},
+    "accounts": {"en": "Accounts & Bookkeeping", "hi": "अकाउंट / बहीखाता", "gu": "એકાઉન્ટ / બુકકીપિંગ", "mr": "अकाउंट / वहीखाते"},
+    "purchases": {"en": "Purchases (Invoice, GRN, GSTR3)", "hi": "खरीद (बिल, GRN, GSTR3)", "gu": "ખરીદી (બિલ, GRN, GSTR3)", "mr": "खरेदी (बिल, GRN, GSTR3)"},
+    "purchase_orders": {"en": "Purchase Orders", "hi": "खरीद ऑर्डर", "gu": "ખરીદ ઓર્ડર", "mr": "खरेदी ऑर्डर"},
+    "inventory": {"en": "Inventory (Batch-wise)", "hi": "इन्वेंटरी (बैच वार)", "gu": "ઈન્વેન્ટરી (બેચ વાર)", "mr": "इन्व्हेंटरी (बॅच-वार)"},
+    "manufacturing": {"en": "Manufacturing (BOM, Job, Backflush)", "hi": "मैन्युफैक्चरिंग (BOM, जॉब)", "gu": "મેન્યુફેક્ચરિંગ (BOM, જોબ)", "mr": "मॅन्युफॅक्चरिंग (BOM, जॉब)"},
+    "projects": {"en": "Projects", "hi": "प्रोजेक्ट", "gu": "પ્રોજેક્ટ", "mr": "प्रकल्प"},
+    "tasks": {"en": "Tasks & Todo", "hi": "टास्क / टू-डू", "gu": "ટાસ્ક / ટુ-ડુ", "mr": "टास्क / टू-डू"},
+    "suppliers": {"en": "Suppliers Master", "hi": "सप्लायर मास्टर", "gu": "સપ્લાયર માસ્ટર", "mr": "सप्लायर मास्टर"},
+    "store": {"en": "Your Online Store", "hi": "ऑनलाइन स्टोर", "gu": "ઓનલાઇન સ્ટોર", "mr": "ऑनलाइन स्टोअर"},
+    "reports": {"en": "Reports & Analytics", "hi": "रिपोर्ट / एनालिटिक्स", "gu": "રિપોર્ટ / એનાલિટિક્સ", "mr": "रिपोर्ट / अॅनालिटिक्स"},
 }
+
+# Languages — Indian + International. Admin can add more via /admin/languages.
+DEFAULT_LANGUAGES = [
+    {"code": "en", "label": "English", "native": "English"},
+    {"code": "hi", "label": "Hindi", "native": "हिन्दी"},
+    {"code": "gu", "label": "Gujarati", "native": "ગુજરાતી"},
+    {"code": "mr", "label": "Marathi", "native": "मराठी"},
+]
+
+async def get_module_labels() -> Dict[str, Dict[str, str]]:
+    """Returns module_key -> {lang: label}. Merges DB overrides on top of defaults."""
+    doc = await db.module_labels.find_one({"_id": "main"})
+    if doc and isinstance(doc.get("labels"), dict):
+        merged = {**DEFAULT_MODULE_LABELS}
+        for k, v in doc["labels"].items():
+            if isinstance(v, dict):
+                merged[k] = {**DEFAULT_MODULE_LABELS.get(k, {}), **v}
+        return merged
+    return DEFAULT_MODULE_LABELS
+
+# Backwards-compatible reference (used in narration seed strings)
+MODULE_LABELS = DEFAULT_MODULE_LABELS
 
 WORKFLOW_ORDER = ["crm", "quotes", "sales_orders", "sales_invoices", "recovery", "contracts",
                   "tickets", "customers", "purchase_orders", "purchases", "inventory",
@@ -315,7 +366,8 @@ async def quiz_options(business_type: Optional[str] = None, product_category: Op
     final = [m for m in cfg_mods if m in available_modules]
     if not final:
         final = available_modules  # fallback show all available
-    out = [{"key": m, "label": MODULE_LABELS.get(m, {"en": m})} for m in final]
+    labels = await get_module_labels()
+    out = [{"key": m, "label": labels.get(m, {"en": m})} for m in final]
     return {"modules": out}
 
 @api.post("/quiz/submit")
@@ -787,6 +839,60 @@ async def set_quiz_options(payload: QuizOptionsIn, user=Depends(admin_dep)):
     doc = payload.model_dump()
     await db.quiz_config.update_one({"_id": "main"}, {"$set": doc}, upsert=True)
     return doc
+
+# ========== Module Labels (public + admin) ==========
+@api.get("/module-labels")
+async def public_module_labels():
+    labels = await get_module_labels()
+    return {"labels": labels}
+
+@api.get("/admin/module-labels")
+async def admin_get_module_labels(user=Depends(admin_dep)):
+    labels = await get_module_labels()
+    return {"labels": labels}
+
+@api.put("/admin/module-labels")
+async def admin_set_module_labels(payload: Dict[str, Any], user=Depends(admin_dep)):
+    labels = payload.get("labels") or {}
+    if not isinstance(labels, dict):
+        raise HTTPException(400, "Body must be {'labels': {module_key: {lang: text}}}")
+    await db.module_labels.update_one({"_id": "main"}, {"$set": {"labels": labels}}, upsert=True)
+    return {"labels": (await get_module_labels())}
+
+# ========== Languages (public + admin) ==========
+async def get_languages_list() -> List[Dict[str, str]]:
+    doc = await db.settings.find_one({"_id": "main"})
+    langs = (doc or {}).get("languages")
+    if isinstance(langs, list) and langs:
+        return langs
+    return DEFAULT_LANGUAGES
+
+@api.get("/languages")
+async def public_languages():
+    return {"languages": await get_languages_list()}
+
+@api.put("/admin/languages")
+async def admin_set_languages(payload: Dict[str, Any], user=Depends(admin_dep)):
+    langs = payload.get("languages") or []
+    if not isinstance(langs, list):
+        raise HTTPException(400, "Body must be {'languages': [{code, label, native}, ...]}")
+    # Validate shape
+    cleaned = []
+    seen = set()
+    for l in langs:
+        code = (l.get("code") or "").strip().lower()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        cleaned.append({
+            "code": code,
+            "label": (l.get("label") or code.upper()).strip(),
+            "native": (l.get("native") or l.get("label") or code.upper()).strip(),
+        })
+    if not cleaned:
+        raise HTTPException(400, "At least one valid language required")
+    await db.settings.update_one({"_id": "main"}, {"$set": {"languages": cleaned}}, upsert=True)
+    return {"languages": cleaned}
 
 # ========== Admin: Coverage ==========
 @api.get("/admin/coverage")

@@ -136,7 +136,11 @@ export default function VideoEditor() {
             </label>
           </div>
           {/* Targeting */}
-          <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
+          <div className="grid grid-cols-4 gap-2 mt-2 text-xs">
+            <label>
+              <div className="uppercase tracking-widest text-slate-500 font-bold mb-1">Primary audio language</div>
+              <input value={video.primary_language || ""} onChange={e=>setVideo({...video, primary_language: e.target.value.trim().toLowerCase() || null})} placeholder="hi (auto-translate captions for other langs)" className="w-full border border-slate-200 rounded px-2 py-1 font-mono" />
+            </label>
             <label>
               <div className="uppercase tracking-widest text-slate-500 font-bold mb-1">Languages (empty=all)</div>
               <input value={(video.target_languages||[]).join(",")} onChange={e=>setVideo({...video, target_languages: e.target.value.split(",").map(s=>s.trim()).filter(Boolean)})} placeholder="en,hi,gu,mr" className="w-full border border-slate-200 rounded px-2 py-1 font-mono" />

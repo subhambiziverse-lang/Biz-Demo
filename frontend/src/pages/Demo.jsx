@@ -139,19 +139,43 @@ export default function Demo() {
       return;
     }
     let cancelled = false;
+    // Auto-translate captions when user's language differs from video's primary
+    const primary = (currentVideo.primary_language || "").toLowerCase();
+    const needsTranslation = primary && lang && primary !== lang;
     loadYouTubeAPI().then(YT => {
       if (cancelled || !ytContainerRef.current) return;
       const vid = extractYouTubeId(currentVideo.video_url);
       if (ytPlayerRef.current) { try { ytPlayerRef.current.destroy(); } catch(e){} }
+      const pv = {
+        autoplay: 1, controls: 0, modestbranding: 1, rel: 0, playsinline: 1, fs: 0,
+        disablekb: 1, vq: "hd1080", hd: 1,
+        hl: lang,  // YouTube UI language
+        start: currentVideo._kb_start ? Math.floor(currentVideo._kb_start) : 0,
+      };
+      if (needsTranslation) {
+        pv.cc_load_policy = 1;     // force subtitles on
+        pv.cc_lang_pref = lang;    // request subtitles in user's language (auto-translated)
+      }
       ytPlayerRef.current = new YT.Player(ytContainerRef.current, {
         videoId: vid,
-        playerVars: { autoplay: 1, controls: 0, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, disablekb: 1, vq: "hd1080", hd: 1, start: currentVideo._kb_start ? Math.floor(currentVideo._kb_start) : 0 },
+        playerVars: pv,
         events: {
           onReady: (e) => {
             try {
               e.target.setPlaybackQuality?.("hd1080");
               e.target.playVideo();
               if (currentVideo._kb_start) e.target.seekTo(currentVideo._kb_start, true);
+              if (needsTranslation) {
+                // Programmatically enable + translate the caption track
+                try { e.target.loadModule?.("captions"); } catch(_){}
+                try { e.target.loadModule?.("cc"); } catch(_){}
+                setTimeout(() => {
+                  try { e.target.setOption?.("captions", "reload", true); } catch(_){}
+                  try { e.target.setOption?.("captions", "track", { languageCode: lang }); } catch(_){}
+                  try { e.target.setOption?.("cc", "track", { languageCode: lang }); } catch(_){}
+                  try { e.target.setOption?.("captions", "reload", { tlang: lang }); } catch(_){}
+                }, 800);
+              }
             } catch(err){}
             setDuration(e.target.getDuration() || 0);
           },
@@ -178,7 +202,7 @@ export default function Demo() {
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line
-  }, [currentVideo?.id, isYT]);
+  }, [currentVideo?.id, isYT, lang]);
 
   // Unified time + marker poller (works for both players)
   useEffect(() => {

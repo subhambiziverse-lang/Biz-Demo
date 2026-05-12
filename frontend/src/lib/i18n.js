@@ -1,10 +1,33 @@
 // Simple translation dictionary. UI text only — narrations come from backend.
-export const LANGS = [
+// LANGS is now mutable and gets hydrated from /api/languages at app boot.
+// Callers should re-read it after `loadLanguages()` resolves, or import the helper.
+export let LANGS = [
   { code: "en", label: "English", native: "English" },
   { code: "hi", label: "Hindi", native: "हिन्दी" },
   { code: "gu", label: "Gujarati", native: "ગુજરાતી" },
   { code: "mr", label: "Marathi", native: "मराठी" },
 ];
+
+const LANG_LISTENERS = new Set();
+export function onLanguagesChange(fn) {
+  LANG_LISTENERS.add(fn);
+  return () => LANG_LISTENERS.delete(fn);
+}
+
+export async function loadLanguages() {
+  try {
+    const base = process.env.REACT_APP_BACKEND_URL;
+    if (!base) return LANGS;
+    const r = await fetch(`${base}/api/languages`);
+    if (!r.ok) return LANGS;
+    const data = await r.json();
+    if (Array.isArray(data.languages) && data.languages.length > 0) {
+      LANGS = data.languages;
+      LANG_LISTENERS.forEach(fn => { try { fn(LANGS); } catch(_) {} });
+    }
+  } catch (_) { /* fallback to defaults */ }
+  return LANGS;
+}
 
 export const TR = {
   en: {
