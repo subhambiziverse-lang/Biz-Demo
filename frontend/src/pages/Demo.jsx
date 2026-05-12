@@ -45,17 +45,54 @@ export default function Demo() {
   const ytIntervalRef = useRef(null);
   const playerRef = useRef(null);
   const chatEndRef = useRef(null);
+  const moduleStripRef = useRef(null);
+  const chapterStripRef = useRef(null);
 
   useEffect(() => { if (!demoData) nav("/quiz"); /* eslint-disable-next-line */ }, []);
   useEffect(() => { trackEvent("demo_started"); /* eslint-disable-next-line */ }, []);
   useEffect(() => { voice.setEnabled(voiceOn); }, [voiceOn]);
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
 
+  // Center the active module chip in the timeline strip
+  useEffect(() => {
+    const strip = moduleStripRef.current;
+    if (!strip) return;
+    const active = strip.querySelector(`[data-testid="module-chip-${vidIdx}"]`);
+    if (!active) return;
+    const target = active.offsetLeft - (strip.clientWidth / 2) + (active.clientWidth / 2);
+    strip.scrollTo({ left: Math.max(0, target), behavior: "smooth" });
+  }, [vidIdx]);
+
   const videos = demoData?.videos || [];
   const mainVideo = videos[vidIdx];
   const currentVideo = miniDemoVideo || mainVideo;
   const markers = ((currentVideo?.markers) || []).slice().sort((a,b)=>a.timestamp-b.timestamp);
   const inMiniDemo = !!miniDemoVideo;
+
+  // Find the currently active chapter (based on playhead time)
+  const chapters = currentVideo?.chapters || [];
+  const activeChapterIdx = (() => {
+    if (!chapters.length) return -1;
+    for (let i = chapters.length - 1; i >= 0; i--) {
+      const ch = chapters[i];
+      const start = ch.start || 0;
+      const end = ch.end != null ? ch.end : Infinity;
+      if (progress >= start && progress < end) return i;
+    }
+    // If past the last chapter's end, still highlight the last
+    if (progress >= (chapters[chapters.length - 1].start || 0)) return chapters.length - 1;
+    return -1;
+  })();
+
+  // Auto-center active chapter chip
+  useEffect(() => {
+    const strip = chapterStripRef.current;
+    if (!strip || activeChapterIdx < 0) return;
+    const active = strip.querySelector(`[data-testid="chapter-chip-${activeChapterIdx}"]`);
+    if (!active) return;
+    const target = active.offsetLeft - (strip.clientWidth / 2) + (active.clientWidth / 2);
+    strip.scrollTo({ left: Math.max(0, target), behavior: "smooth" });
+  }, [activeChapterIdx]);
 
   const isYT = isYouTube(currentVideo?.video_url || "");
   const currentMarker = markerIdx >= 0 ? markers[markerIdx] : null;
@@ -543,10 +580,10 @@ export default function Demo() {
           {/* Module timeline / chapter navigator — below player */}
           {!maximized && !tryYourselfMode && !inMiniDemo && videos.length > 1 && (
             <div className="mt-4 bg-white border border-slate-200 rounded-2xl p-3">
-              <div className="flex items-center gap-2 overflow-x-auto thin-scroll">
+              <div ref={moduleStripRef} className="flex items-center gap-2 overflow-x-auto thin-scroll scroll-smooth">
                 {videos.map((v, i) => (
                   <button key={v.id} data-testid={`module-chip-${i}`} onClick={()=>jumpToModule(i)}
-                    className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${i===vidIdx ? "bg-orange-600 text-white" : i<vidIdx ? "bg-slate-100 text-slate-500 line-through" : "bg-slate-100 text-slate-700 hover:bg-orange-50"}`}>
+                    className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${i===vidIdx ? "bg-orange-600 text-white ring-2 ring-orange-300" : i<vidIdx ? "bg-slate-100 text-slate-500 line-through" : "bg-slate-100 text-slate-700 hover:bg-orange-50"}`}>
                     <span className="opacity-60 mr-1">{i+1}.</span>{v.title}
                   </button>
                 ))}
@@ -558,14 +595,17 @@ export default function Demo() {
           {!maximized && !tryYourselfMode && (currentVideo?.chapters || []).length > 0 && (
             <div className="mt-3 bg-white border border-slate-200 rounded-2xl p-3">
               <div className="text-xs uppercase tracking-widest text-slate-500 font-bold mb-2">Chapters</div>
-              <div className="flex items-center gap-2 overflow-x-auto thin-scroll">
-                {(currentVideo.chapters || []).map((ch, i) => (
-                  <button key={i} onClick={()=>doSeek(ch.start || 0)}
-                    className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs bg-slate-50 hover:bg-orange-50 border border-slate-200 text-slate-700 hover:border-orange-300 text-left">
-                    <div className="font-bold text-secondary">{ch.name}</div>
-                    <div className="text-[10px] font-mono text-slate-400">{fmtTime(ch.start||0)}{ch.end ? ` – ${fmtTime(ch.end)}` : ""}</div>
-                  </button>
-                ))}
+              <div ref={chapterStripRef} className="flex items-center gap-2 overflow-x-auto thin-scroll scroll-smooth">
+                {(currentVideo.chapters || []).map((ch, i) => {
+                  const isActive = i === activeChapterIdx;
+                  return (
+                    <button key={i} data-testid={`chapter-chip-${i}`} onClick={()=>doSeek(ch.start || 0)}
+                      className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs border text-center transition-colors ${isActive ? "bg-orange-600 text-white border-orange-700 shadow-sm ring-2 ring-orange-300" : "bg-slate-50 hover:bg-orange-50 border-slate-200 text-slate-700 hover:border-orange-300"}`}>
+                      <div className={`font-bold ${isActive ? "text-white" : "text-secondary"}`}>{ch.name}</div>
+                      <div className={`text-[10px] font-mono ${isActive ? "text-white/80" : "text-slate-400"}`}>{fmtTime(ch.start||0)}{ch.end ? ` – ${fmtTime(ch.end)}` : ""}</div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
