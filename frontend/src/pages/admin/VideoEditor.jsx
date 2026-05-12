@@ -13,6 +13,7 @@ export default function VideoEditor() {
   const nav = useNavigate();
   const [video, setVideo] = useState(null);
   const [activeMarker, setActiveMarker] = useState(null);
+  const [showChapters, setShowChapters] = useState(false);
   const videoRef = useRef(null);
   const ytContainerRef = useRef(null);
   const ytPlayerRef = useRef(null);
@@ -128,6 +129,26 @@ export default function VideoEditor() {
               Default Biziverse URL for "Try Yourself":
               <input value={video.biziverse_url || ""} onChange={e=>setVideo({...video, biziverse_url: e.target.value})} placeholder="https://biziverse.com/..." className="flex-1 outline-none bg-white border border-slate-200 rounded-lg px-3 py-1.5 font-mono text-xs" />
             </label>
+            <label className="flex items-center gap-2 cursor-pointer text-xs whitespace-nowrap">
+              <input type="checkbox" checked={video.show_try_yourself !== false}
+                onChange={e=>setVideo({...video, show_try_yourself: e.target.checked})} className="accent-orange-600 h-4 w-4" />
+              Show "Try Yourself" on this video
+            </label>
+          </div>
+          {/* Targeting */}
+          <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
+            <label>
+              <div className="uppercase tracking-widest text-slate-500 font-bold mb-1">Languages (empty=all)</div>
+              <input value={(video.target_languages||[]).join(",")} onChange={e=>setVideo({...video, target_languages: e.target.value.split(",").map(s=>s.trim()).filter(Boolean)})} placeholder="en,hi,gu,mr" className="w-full border border-slate-200 rounded px-2 py-1 font-mono" />
+            </label>
+            <label>
+              <div className="uppercase tracking-widest text-slate-500 font-bold mb-1">Business types (empty=all)</div>
+              <input value={(video.target_business_types||[]).join(",")} onChange={e=>setVideo({...video, target_business_types: e.target.value.split(",").map(s=>s.trim()).filter(Boolean)})} placeholder="wholesale,distributor,..." className="w-full border border-slate-200 rounded px-2 py-1 font-mono" />
+            </label>
+            <label>
+              <div className="uppercase tracking-widest text-slate-500 font-bold mb-1">Product categories (empty=all)</div>
+              <input value={(video.target_product_categories||[]).join(",")} onChange={e=>setVideo({...video, target_product_categories: e.target.value.split(",").map(s=>s.trim()).filter(Boolean)})} placeholder="textiles,electronics,..." className="w-full border border-slate-200 rounded px-2 py-1 font-mono" />
+            </label>
           </div>
         </div>
         <div className="flex gap-2">
@@ -154,6 +175,33 @@ export default function VideoEditor() {
           <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
             <div>Current time: <span className="font-mono font-bold text-secondary">{currentTime.toFixed(1)}s</span></div>
             <div>{activeMarker ? "Click inside the video to place the cursor position" : "Select a marker to edit its overlays"}</div>
+          </div>
+
+          {/* Chapters editor (YouTube-style timestamps) */}
+          <div className="mt-4 bg-white border border-slate-200 rounded-2xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="font-display font-bold text-secondary">Chapters / Timestamps</div>
+              <Button size="sm" onClick={()=>{
+                const t = getTime();
+                const name = prompt("Chapter name (e.g. 'Import Leads'):"); if (!name) return;
+                setVideo({...video, chapters: [...(video.chapters||[]), { name, start: +t.toFixed(1), end: null }]});
+              }} className="bg-orange-600 text-white"><Plus className="h-3.5 w-3.5 mr-1" />Add @ {currentTime.toFixed(1)}s</Button>
+            </div>
+            <div className="space-y-1.5">
+              {(video.chapters||[]).sort((a,b)=>(a.start||0)-(b.start||0)).map((ch, i) => (
+                <div key={i} className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 py-2">
+                  <button onClick={()=>seekTo(ch.start||0)} className="font-mono text-xs text-orange-600 font-bold w-16 text-left hover:underline">{Math.floor((ch.start||0)/60)}:{(Math.floor(ch.start||0)%60).toString().padStart(2,"0")}</button>
+                  <input value={ch.name} onChange={e=>{ const c=[...video.chapters]; c[i]={...c[i], name:e.target.value}; setVideo({...video, chapters:c}); }}
+                    className="flex-1 bg-transparent outline-none text-sm font-semibold" />
+                  <input type="number" step="0.1" value={ch.start} onChange={e=>{ const c=[...video.chapters]; c[i]={...c[i], start:+e.target.value}; setVideo({...video, chapters:c}); }}
+                    className="w-20 text-xs font-mono border border-slate-200 rounded px-1 py-0.5" />
+                  <input type="number" step="0.1" placeholder="end" value={ch.end||""} onChange={e=>{ const c=[...video.chapters]; c[i]={...c[i], end:e.target.value?+e.target.value:null}; setVideo({...video, chapters:c}); }}
+                    className="w-20 text-xs font-mono border border-slate-200 rounded px-1 py-0.5" />
+                  <button onClick={()=>setVideo({...video, chapters: video.chapters.filter((_,j)=>j!==i)})} className="text-red-500 hover:bg-red-50 p-1 rounded"><Trash2 className="h-3.5 w-3.5" /></button>
+                </div>
+              ))}
+              {(video.chapters||[]).length === 0 && <div className="text-xs text-slate-400 text-center py-4">No chapters yet. Add timestamps so users can jump to specific sections.</div>}
+            </div>
           </div>
         </div>
 

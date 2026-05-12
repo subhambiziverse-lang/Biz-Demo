@@ -1,15 +1,27 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Button } from "../components/ui/button";
 import { useApp } from "../contexts/AppContext";
 import { t, LANGS } from "../lib/i18n";
-import { ArrowRight, Zap, ShieldCheck, Globe, Sparkles, Play } from "lucide-react";
+import { ArrowRight, Zap, ShieldCheck, Globe, Sparkles, Play, Phone } from "lucide-react";
+import api from "../lib/api";
 
 export default function Landing() {
   const nav = useNavigate();
   const { lang, setLang, trackEvent } = useApp();
+  const [settings, setSettings] = useState({ show_executive_cta: true });
+  const [showCallback, setShowCallback] = useState(false);
+  const [phone, setPhone] = useState("");
+  const [callbackTime, setCallbackTime] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+
+  useEffect(() => { api.get("/settings").then(r => setSettings(r.data)).catch(()=>{}); }, []);
 
   const onStart = async () => { await trackEvent("landing_cta_clicked"); nav("/quiz"); };
+  const submitCallback = () => {
+    trackEvent("landing_callback_requested", { phone, callbackTime });
+    setConfirmed(true);
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -54,6 +66,12 @@ export default function Landing() {
                 <Play className="mr-2 h-5 w-5 fill-white" /> {t(lang, "start_demo")} <ArrowRight className="ml-2 h-5 w-5" />
               </Button>
               <span className="text-sm text-slate-500 font-medium">No signup • 2 minutes • 4 languages</span>
+              {settings.show_executive_cta && (
+                <Button data-testid="landing-exec-btn" variant="outline" onClick={()=>{ setShowCallback(true); setConfirmed(false); }}
+                  className="rounded-full h-14 px-6 border-2 border-secondary text-secondary hover:bg-secondary hover:text-white">
+                  <Phone className="mr-2 h-4 w-4" /> Talk with an executive
+                </Button>
+              )}
             </div>
 
             <div className="mt-10 grid grid-cols-3 gap-4 max-w-md">
@@ -114,6 +132,51 @@ export default function Landing() {
           </div>
         </div>
       </footer>
+
+      {/* Callback modal (admin-toggleable) */}
+      {showCallback && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-50 grid place-items-center p-6" onClick={()=>setShowCallback(false)}>
+          <div className="bg-white rounded-3xl p-8 max-w-lg w-full shadow-2xl" onClick={e=>e.stopPropagation()}>
+            {!confirmed ? (
+              <>
+                <div className="text-xs uppercase tracking-widest text-orange-600 font-bold">Schedule a call-back</div>
+                <h2 className="font-display text-3xl font-black text-secondary mt-2">Talk with an executive</h2>
+                <p className="text-slate-500 text-sm mt-1">Our team will call you back at the time you choose.</p>
+                <div className="mt-5 flex items-center gap-2">
+                  <div className="px-3 py-3 bg-slate-100 rounded-xl font-mono text-sm text-slate-600">+91</div>
+                  <input data-testid="landing-cb-phone" type="tel" maxLength={10} value={phone}
+                    onChange={e=>setPhone(e.target.value.replace(/\D/g,""))}
+                    placeholder="10-digit mobile"
+                    className="flex-1 border-2 border-slate-200 rounded-xl px-4 py-3 font-mono text-lg focus:outline-none focus:border-orange-500" />
+                </div>
+                <label className="block mt-4 text-xs uppercase tracking-widest text-slate-500 font-bold">Preferred call-back time</label>
+                <input data-testid="landing-cb-time" type="datetime-local" value={callbackTime}
+                  min={(()=>{ const d=new Date(Date.now()+11*60*1000); d.setSeconds(0); return d.toISOString().slice(0,16); })()}
+                  onChange={e=>setCallbackTime(e.target.value)}
+                  className="mt-2 w-full border-2 border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:border-orange-500" />
+                <p className="text-xs text-slate-400 mt-1">Minimum 10 minutes from now.</p>
+                <Button data-testid="landing-cb-submit"
+                  disabled={phone.length!==10 || !callbackTime || (new Date(callbackTime).getTime() - Date.now() < 10*60*1000)}
+                  onClick={submitCallback}
+                  className="w-full mt-5 bg-orange-600 hover:bg-orange-700 text-white rounded-full h-12 font-bold disabled:opacity-50">Request call-back</Button>
+                <button onClick={()=>setShowCallback(false)} className="mt-3 text-xs text-slate-500 hover:text-secondary">Cancel</button>
+              </>
+            ) : (
+              <>
+                <div className="h-16 w-16 mx-auto rounded-full bg-emerald-100 grid place-items-center mb-4"><Sparkles className="h-8 w-8 text-emerald-600" /></div>
+                <h2 className="font-display text-3xl font-black text-secondary text-center">Call-back scheduled</h2>
+                <p className="text-slate-600 text-sm mt-2 text-center">We'll try calling you back at:</p>
+                <div className="text-center font-display text-xl font-bold text-orange-600 mt-2">
+                  {new Date(callbackTime).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                </div>
+                <p className="text-xs text-slate-400 text-center mt-3">on +91 {phone}</p>
+                <Button onClick={()=>{ setShowCallback(false); setPhone(""); setCallbackTime(""); }}
+                  className="w-full mt-6 bg-orange-600 hover:bg-orange-700 text-white rounded-full h-12 font-bold">Done</Button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

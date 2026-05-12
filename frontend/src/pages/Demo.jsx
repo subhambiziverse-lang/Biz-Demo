@@ -62,6 +62,13 @@ export default function Demo() {
   // Marker is "active" (showing highlight + cursor) only while between its timestamp and end_time
   const activeMarker = currentMarker && (currentMarker.end_time == null || progress <= currentMarker.end_time + 0.2) ? currentMarker : null;
 
+  // Listen for executive callback request from AI chat
+  useEffect(() => {
+    const handler = () => setEndFlow("callback");
+    window.addEventListener("biz-open-callback", handler);
+    return () => window.removeEventListener("biz-open-callback", handler);
+  }, []);
+
   // Compute biziverse_url for try-yourself based on current marker (admin-configurable per-marker)
   const biziverseUrl = (currentMarker && currentMarker.biziverse_url) || currentVideo?.biziverse_url || "https://biziverse.com";
 
@@ -101,11 +108,21 @@ export default function Demo() {
       if (ytPlayerRef.current) { try { ytPlayerRef.current.destroy(); } catch(e){} }
       ytPlayerRef.current = new YT.Player(ytContainerRef.current, {
         videoId: vid,
-        playerVars: { autoplay: 1, controls: 0, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, disablekb: 1 },
+        playerVars: { autoplay: 1, controls: 0, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, disablekb: 1, vq: "hd1080", hd: 1, start: currentVideo._kb_start ? Math.floor(currentVideo._kb_start) : 0 },
         events: {
-          onReady: (e) => { try { e.target.playVideo(); } catch(err){} setDuration(e.target.getDuration() || 0); },
+          onReady: (e) => {
+            try {
+              e.target.setPlaybackQuality?.("hd1080");
+              e.target.playVideo();
+              if (currentVideo._kb_start) e.target.seekTo(currentVideo._kb_start, true);
+            } catch(err){}
+            setDuration(e.target.getDuration() || 0);
+          },
           onStateChange: (e) => {
-            if (e.data === 1) { setPlaying(true); }
+            if (e.data === 1) {
+              setPlaying(true);
+              try { e.target.setPlaybackQuality?.("hd1080"); } catch(err){}
+            }
             else if (e.data === 2) setPlaying(false);
             else if (e.data === 0) {
               if (inMiniDemo) exitMiniDemo();
@@ -135,6 +152,11 @@ export default function Demo() {
       const d = doGetDuration();
       setProgress(t);
       if (d && Math.abs(d - duration) > 0.5) setDuration(d);
+      // Auto-end KB-played clips at _kb_end
+      if (inMiniDemo && currentVideo?._kb_end && t >= currentVideo._kb_end) {
+        exitMiniDemo();
+        return;
+      }
       if (markerIdx + 1 < markers.length && t >= markers[markerIdx + 1].timestamp) {
         const nextIdx = markerIdx + 1;
         setMarkerIdx(nextIdx);
@@ -242,21 +264,34 @@ export default function Demo() {
     trackEvent("demo_resumed");
   };
 
+  const playKBVideo = (videoUrl, topic = "", start = 0, end = null) => {
+    if (!videoUrl) return;
+    voice.stop();
+    doPause();
+    // Construct a synthetic mini video object so the YT/HTML5 player handles it
+    setMiniDemoVideo({
+      id: `kb_${Date.now()}`,
+      title: topic || "Demo",
+      video_url: videoUrl,
+      markers: [],
+      chapters: [],
+      _kb_start: start || 0,
+      _kb_end: end || null
+    });
+    setMiniDemoTopic(topic);
+    setMarkerIdx(-1);
+    setActiveNarration(null);
+    userPausedRef.current = false;
+    setPendingMini(null);
+    trackEvent("kb_video_played", { topic, videoUrl });
+  };
+
   const playMiniDemo = async (miniId, topic = "") => {
     try {
       const r = await api.get(`/mini-demos/${miniId}`);
       const v = r.data?.video;
       if (!v) return;
-      voice.stop();
-      videoRef.current?.pause();
-      setMiniDemoVideo(v);
-      setMiniDemoTopic(topic);
-      setMarkerIdx(-1);
-      setActiveNarration(null);
-      userPausedRef.current = false;
-      setTimeout(()=> { videoRef.current && (videoRef.current.currentTime = 0); videoRef.current?.play().catch(()=>{}); }, 200);
-      trackEvent("mini_demo_started", { mini_id: miniId, topic });
-      setPendingMini(null);
+      playKBVideo(v.video_url, topic);
     } catch (e) { console.error(e); }
   };
 
@@ -267,7 +302,8 @@ export default function Demo() {
     setMarkerIdx(-1);
     setActiveNarration(null);
     userPausedRef.current = false;
-    setTimeout(()=> { videoRef.current?.play().catch(()=>{}); setPlaying(true); }, 300);
+    setPlaying(true);
+    // Force YT player to re-initialize for main video by toggling refresh tick
     trackEvent("mini_demo_exited");
   };
 
@@ -276,7 +312,8 @@ export default function Demo() {
     const q = chatInput.trim();
     setChat(c => [...c, { role: "user", text: q }]);
     setChatInput(""); setChatLoading(true);
-    if (!tryYourselfMode) videoRef.current?.pause(); voice.stop();
+    if (!tryYourselfMode) doPause();
+    voice.stop();
     try {
       const r = await api.post("/ai/chat", {
         session_id: sessionId, message: q, language: lang,
@@ -284,24 +321,28 @@ export default function Demo() {
         modules: quiz?.mods || [], current_step: vidIdx
       });
       const ans = r.data.answer || "";
-      const linkedMini = r.data.linked_mini_demo_id;
-      setChat(c => [...c, { role: "ai", text: ans }]);
-      if (linkedMini) {
-        setPendingMini({ mini_id: linkedMini, topic: q });
-        setChat(c => [...c, { role: "ai", text: "Want me to show you how this works?", prompt: "show_me", mini_id: linkedMini, topic: q }]);
+      const videoUrl = r.data.video_url;
+      const noAnswer = r.data.no_answer;
+      const msg = { role: "ai", text: ans };
+      if (noAnswer) msg.exec_cta = true;
+      setChat(c => [...c, msg]);
+      if (videoUrl) {
+        setPendingMini({ video_url: videoUrl, topic: q, start: r.data.video_start, end: r.data.video_end });
+        setChat(c => [...c, { role: "ai", text: "Want me to show you how this works?", prompt: "show_me", video_url: videoUrl, topic: q, video_start: r.data.video_start, video_end: r.data.video_end }]);
+      } else if (!noAnswer) {
+        if (!tryYourselfMode && playing) doPlay();
       }
-      // No TTS — user wants only video audio. Resume video.
-      if (!tryYourselfMode && playing && !linkedMini) doPlay();
     } catch (e) {
       setChat(c => [...c, { role: "ai", text: "I'm having trouble answering right now. Please try again." }]);
     }
     setChatLoading(false);
   };
 
-  const acceptShowMe = (miniId, topic) => playMiniDemo(miniId, topic);
+  const acceptShowMe = (m) => playKBVideo(m.video_url, m.topic, m.video_start, m.video_end);
   const declineShowMe = () => {
     setPendingMini(null);
-    if (!tryYourselfMode && playing) videoRef.current?.play().catch(()=>{});
+    setChat(c => c.filter(m => m.prompt !== "show_me"));
+    if (!tryYourselfMode) { doPlay(); setPlaying(true); }
   };
 
   const transitionLabel = videos[vidIdx + 1]?.title || "";
@@ -483,8 +524,24 @@ export default function Demo() {
             </div>
           )}
 
+          {/* Video chapters strip (YouTube-style timestamps configured by admin) */}
+          {!maximized && !tryYourselfMode && (currentVideo?.chapters || []).length > 0 && (
+            <div className="mt-3 bg-white border border-slate-200 rounded-2xl p-3">
+              <div className="text-xs uppercase tracking-widest text-slate-500 font-bold mb-2">Chapters</div>
+              <div className="flex items-center gap-2 overflow-x-auto thin-scroll">
+                {(currentVideo.chapters || []).map((ch, i) => (
+                  <button key={i} onClick={()=>doSeek(ch.start || 0)}
+                    className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs bg-slate-50 hover:bg-orange-50 border border-slate-200 text-slate-700 hover:border-orange-300 text-left">
+                    <div className="font-bold text-secondary">{ch.name}</div>
+                    <div className="text-[10px] font-mono text-slate-400">{fmtTime(ch.start||0)}{ch.end ? ` – ${fmtTime(ch.end)}` : ""}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Player controls (Try Yourself) — hide when maximized */}
-          {!maximized && !tryYourselfMode && !inMiniDemo && (
+          {!maximized && !tryYourselfMode && !inMiniDemo && (currentVideo?.show_try_yourself !== false) && (
             <div className="mt-4 flex flex-wrap items-center gap-3">
               <Button data-testid="try-yourself" onClick={tryYourself} className="bg-secondary hover:bg-secondary/90 text-white rounded-full">
                 <ExternalLink className="h-4 w-4 mr-2" /> {t(lang,"try_yourself")}
@@ -644,20 +701,29 @@ function ChatHeader({ lang }) {
   );
 }
 
-function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline }) {
+function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, settings }) {
+  const openExec = () => {
+    const ev = new CustomEvent("biz-open-callback");
+    window.dispatchEvent(ev);
+  };
   return (
     <div className="flex-1 overflow-y-auto thin-scroll px-5 py-4 space-y-3">
       {chat.length === 0 && (
         <div className="text-sm text-slate-500 bg-slate-50 rounded-xl p-3 border border-slate-200">
-          Hi! I'll narrate this demo and answer any questions you have. Try asking <em>"Does this support GST?"</em> or <em>"How does Recovery work?"</em>
+          Hi! Ask me anything about Biziverse — I'll answer from our knowledge base. Try <em>"Does this support GST?"</em>
         </div>
       )}
       {chat.map((m,i)=>(
         <div key={i} className={`text-sm ${m.role==="user"?"ml-auto bg-orange-600 text-white":"bg-slate-100 text-slate-800"} max-w-[90%] rounded-2xl px-4 py-2.5`}>
           <div>{m.text}</div>
-          {m.prompt === "show_me" && m.mini_id && (
+          {m.exec_cta && (
             <div className="flex gap-2 mt-2">
-              <Button data-testid="show-me-yes" size="sm" onClick={()=>onAccept(m.mini_id, m.topic)} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs h-8">Show me</Button>
+              <Button data-testid="exec-cta" size="sm" onClick={openExec} className="bg-secondary hover:bg-secondary/90 text-white rounded-full text-xs h-8">Talk with executive</Button>
+            </div>
+          )}
+          {m.prompt === "show_me" && (
+            <div className="flex gap-2 mt-2">
+              <Button data-testid="show-me-yes" size="sm" onClick={()=>onAccept(m)} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs h-8">Show me</Button>
               <Button data-testid="show-me-no" size="sm" variant="outline" onClick={onDecline} className="rounded-full text-xs h-8">No, thanks</Button>
             </div>
           )}

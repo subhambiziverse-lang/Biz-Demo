@@ -84,6 +84,12 @@ async def get_current_admin(session_token: Optional[str] = Cookie(None),
         raise HTTPException(401, "User not found")
     return user
 
+from fastapi import Depends
+
+async def admin_dep(session_token: Optional[str] = Cookie(None),
+                    authorization: Optional[str] = Header(None)):
+    return await get_current_admin(session_token=session_token, authorization=authorization)
+
 # ========== Models ==========
 class GoogleAuthIn(BaseModel):
     session_id: str
@@ -137,8 +143,13 @@ class ModuleVideoIn(BaseModel):
     storage_path: str = ""
     duration: float = 0
     markers: List[Dict[str, Any]] = []
+    chapters: List[Dict[str, Any]] = []   # [{name, start, end}]
     published: bool = False
     biziverse_url: Optional[str] = None
+    show_try_yourself: bool = True
+    target_languages: List[str] = []        # empty = all
+    target_business_types: List[str] = []   # empty = all
+    target_product_categories: List[str] = []  # empty = all
 
 class FlowIn(BaseModel):
     business_type: str
@@ -390,76 +401,57 @@ async def search_kb(question: str, lang: str):
 
 @api.post("/ai/chat")
 async def ai_chat(payload: ChatIn):
-    # Try KB first
-    kb_hit = await search_kb(payload.message, payload.language)
-    base_answer = None
-    linked_mini = None
-    matched_module = None
-    if kb_hit:
-        base_answer = kb_hit.get("answers", {}).get(payload.language) or kb_hit.get("answers", {}).get("en") or ""
-        linked_mini = kb_hit.get("linked_mini_demo_id")
-
-    # Module-keyword fallback: if message mentions a known module, find a video for it
-    if not linked_mini:
-        q_lower = payload.message.lower()
-        module_keywords = {
-            "crm": ["crm", "lead", "leads", "inquir", "inquiry"],
-            "quotes": ["quote", "quotation", "proforma"],
-            "sales_orders": ["sales order", "order"],
-            "sales_invoices": ["invoice", "billing", "gst", "e-invoice", "e-way", "tally"],
-            "recovery": ["recovery", "pending", "payment", "collection", "reminder", "overdue"],
-            "inventory": ["inventory", "stock", "batch", "warehouse"],
-            "purchases": ["purchase", "vendor", "grn"],
-            "manufacturing": ["manufactur", "production", "backflush"],
-            "reports": ["report", "dashboard", "analytics"],
-        }
-        for mk, words in module_keywords.items():
-            if any(w in q_lower for w in words):
-                v = await db.module_videos.find_one({"module_key": mk, "published": True}, {"_id": 0})
-                if v:
-                    matched_module = mk
-                    # Create or get a mini-demo for this video on-the-fly
-                    existing_mini = await db.mini_demos.find_one({"module_video_id": v["id"]}, {"_id": 0})
-                    if existing_mini:
-                        linked_mini = existing_mini["id"]
-                    else:
-                        mini_id = f"mini_{uuid.uuid4().hex[:10]}"
-                        await db.mini_demos.insert_one({
-                            "id": mini_id, "name": f"Live: {v['title']}",
-                            "module_video_id": v["id"], "steps": [],
-                            "created_at": datetime.now(timezone.utc).isoformat()
-                        })
-                        linked_mini = mini_id
-                    break
-
-    # Build context
+    q = (payload.message or "").strip()
+    q_lower = q.lower()
     lang_names = {"en": "English", "hi": "Hindi", "gu": "Gujarati", "mr": "Marathi"}
-    sys_prompt = (
-        "You are a knowledgeable Biziverse product expert. Biziverse is a complete business management platform "
-        "for Indian wholesale traders, distributors, retailers, manufacturers. "
-        "Answer questions about ANY Biziverse feature or module — not just what the user selected. "
-        "Be helpful, concise (max 60 words). Do NOT disparage competitors. "
-        f"Respond in {lang_names.get(payload.language, 'English')}. "
-        f"User context (for personalisation only — feel free to discuss other modules too): "
-        f"business={payload.business_type}, sells={payload.product_category}, currently exploring={payload.modules}."
-    )
 
-    user_msg = payload.message
-    if base_answer:
-        user_msg = f"User asked: {payload.message}\n\nUse this curated answer as your primary source, rephrase naturally in {lang_names.get(payload.language, 'English')}:\n{base_answer}"
+    # Strict mode: handle greetings, then KB, otherwise log + return executive prompt
+    greetings = ["hi", "hello", "hey", "namaste", "hii", "helo", "hola", "नमस्ते", "नमस्कार"]
+    if any(q_lower == g or q_lower.startswith(g + " ") or q_lower.startswith(g + ",") for g in greetings):
+        greet = {
+            "en": "Hi! I can answer questions about Biziverse features. What would you like to know?",
+            "hi": "नमस्ते! मैं Biziverse के बारे में सवालों के जवाब दे सकता हूँ। आप क्या जानना चाहेंगे?",
+            "gu": "નમસ્તે! હું Biziverse વિશે પ્રશ્નોના જવાબ આપી શકું છું.",
+            "mr": "नमस्कार! मी Biziverse विषयी प्रश्नांची उत्तरे देऊ शकतो."
+        }
+        return {"answer": greet.get(payload.language, greet["en"]), "linked_mini_demo_id": None,
+                "from_kb": False, "no_answer": False, "video_url": None}
 
-    text = ""
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=payload.session_id,
-                       system_message=sys_prompt).with_model("openai", "gpt-5.2")
-        reply = await chat.send_message(UserMessage(text=user_msg))
-        text = str(reply) if reply else ""
-    except Exception as e:
-        logger.error(f"LLM error: {e}")
-        text = base_answer or "I'm having trouble answering right now. Please try again or ask a different question."
+    kb_hit = await search_kb(q, payload.language)
+    if kb_hit:
+        ans = kb_hit.get("answers", {}).get(payload.language) or kb_hit.get("answers", {}).get("en") or ""
+        return {
+            "answer": ans,
+            "linked_mini_demo_id": kb_hit.get("linked_mini_demo_id"),
+            "video_url": kb_hit.get("video_url"),
+            "video_start": kb_hit.get("video_start"),
+            "video_end": kb_hit.get("video_end"),
+            "kb_question": kb_hit.get("question"),
+            "from_kb": True,
+            "no_answer": False
+        }
 
-    return {"answer": text, "linked_mini_demo_id": linked_mini, "from_kb": bool(kb_hit), "kb_question": kb_hit.get("question") if kb_hit else None, "matched_module": matched_module}
+    # Log unanswered question for admin review
+    await db.unanswered_questions.insert_one({
+        "id": f"uq_{uuid.uuid4().hex[:10]}",
+        "session_id": payload.session_id,
+        "question": q,
+        "language": payload.language,
+        "business_type": payload.business_type,
+        "product_category": payload.product_category,
+        "modules": payload.modules or [],
+        "resolved": False,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    fallback = {
+        "en": "I don't have an answer for that yet. Would you like to talk with an executive?",
+        "hi": "मेरे पास इसका जवाब अभी नहीं है। क्या आप किसी executive से बात करना चाहेंगे?",
+        "gu": "મારી પાસે હાલ આ જવાબ નથી. શું તમે executive સાથે વાત કરવા માંગો છો?",
+        "mr": "माझ्याकडे या प्रश्नाचे उत्तर अद्याप नाही. कार्यकारीशी बोलू इच्छिता?"
+    }
+    return {"answer": fallback.get(payload.language, fallback["en"]),
+            "linked_mini_demo_id": None, "video_url": None,
+            "from_kb": False, "no_answer": True}
 
 # ========== Signup (Mocked OTP + Razorpay) ==========
 @api.post("/signup/otp/send")
@@ -511,13 +503,42 @@ async def payment(payload: PaymentIn):
     })
     return {"ok": True, "order_id": order_id, "amount": plan_amount, "status": "success", "mocked": True}
 
+# ========== Settings ==========
+@api.get("/settings")
+async def get_settings_public():
+    s = await db.settings.find_one({"_id": "main"}, {"_id": 0}) or {}
+    return {
+        "show_executive_cta": s.get("show_executive_cta", True),
+        "executive_phone": s.get("executive_phone", ""),
+    }
+
+@api.get("/admin/settings")
+async def get_settings(user=Depends(admin_dep)):
+    s = await db.settings.find_one({"_id": "main"}, {"_id": 0}) or {}
+    return s
+
+@api.put("/admin/settings")
+async def set_settings(payload: Dict[str, Any], user=Depends(admin_dep)):
+    await db.settings.update_one({"_id": "main"}, {"$set": payload}, upsert=True)
+    return await db.settings.find_one({"_id": "main"}, {"_id": 0}) or {}
+
+# ========== Unanswered Questions ==========
+@api.get("/admin/unanswered")
+async def list_unanswered(user=Depends(admin_dep)):
+    items = await db.unanswered_questions.find({}, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
+    return items
+
+@api.post("/admin/unanswered/{qid}/resolve")
+async def resolve_unanswered(qid: str, user=Depends(admin_dep)):
+    await db.unanswered_questions.update_one({"id": qid}, {"$set": {"resolved": True, "resolved_at": datetime.now(timezone.utc).isoformat()}})
+    return {"ok": True}
+
+@api.delete("/admin/unanswered/{qid}")
+async def delete_unanswered(qid: str, user=Depends(admin_dep)):
+    await db.unanswered_questions.delete_one({"id": qid})
+    return {"ok": True}
+
 # ========== Admin: Videos & Markers ==========
-from fastapi import Depends
-
-async def admin_dep(session_token: Optional[str] = Cookie(None),
-                    authorization: Optional[str] = Header(None)):
-    return await get_current_admin(session_token=session_token, authorization=authorization)
-
 @api.get("/admin/videos2")
 async def list_videos2(user=Depends(admin_dep)):
     items = await db.module_videos.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
@@ -703,17 +724,17 @@ async def funnel(user=Depends(admin_dep)):
     sessions_total = await db.sessions.count_documents({})
     quiz_done = await db.sessions.count_documents({"business_type": {"$exists": True}})
     demo_started = await db.events.distinct("session_id", {"event_type": "demo_started"})
-    conversion_views = await db.events.distinct("session_id", {"event_type": "conversion_viewed"})
-    signup_init = await db.events.distinct("session_id", {"event_type": "signup_started"})
+    conversion_views = await db.events.distinct("session_id", {"event_type": "demo_ended"})
+    signup_init = await db.events.distinct("session_id", {"event_type": "offers_selected"})
     paid = await db.payments.count_documents({"status": "success"})
 
     funnel_data = [
         {"stage": "Landing", "count": sessions_total},
         {"stage": "Quiz Completed", "count": quiz_done},
         {"stage": "Demo Started", "count": len(demo_started)},
-        {"stage": "Conversion Screen", "count": len(conversion_views)},
-        {"stage": "Signup Initiated", "count": len(signup_init)},
-        {"stage": "Payment Completed", "count": paid},
+        {"stage": "Demo Ended", "count": len(conversion_views)},
+        {"stage": "Offers Selected", "count": len(signup_init)},
+        {"stage": "Callbacks Scheduled", "count": await db.events.count_documents({"event_type": "callback_requested"})},
     ]
     # popular flows
     pipeline = [{"$group": {"_id": {"bt": "$business_type", "pc": "$product_category"}, "count": {"$sum": 1}}},

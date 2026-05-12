@@ -7,8 +7,8 @@ export default function AnalyticsPage() {
   const [selected, setSelected] = useState(null);
 
   useEffect(() => {
-    api.get("/admin/analytics/funnel").then(r => setData(r.data));
-    api.get("/admin/analytics/sessions").then(r => setSessions(r.data));
+    api.get("/admin/analytics/funnel").then(r => setData(r.data)).catch(e=>console.error("funnel", e));
+    api.get("/admin/analytics/sessions").then(r => setSessions(r.data)).catch(e=>console.error("sessions", e));
   }, []);
 
   const top = data.funnel[0]?.count || 1;
