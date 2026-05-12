@@ -383,20 +383,57 @@ async def session_start():
 
 # ========== AI Chat (KB + LLM) ==========
 async def search_kb(question: str, lang: str):
-    q_lower = question.lower()
+    """Smart KB search: returns either:
+    - {match: kb_entry, confidence: high} if very confident
+    - {clarify: [kb_entries]} if multiple candidates need disambiguation
+    - None if no decent match
+    """
+    q_lower = question.lower().strip()
     entries = await db.kb_entries.find({"active": True}, {"_id": 0}).to_list(500)
-    best = None
-    best_score = 0
-    q_words = set(w for w in q_lower.split() if len(w) > 2)
+    if not entries:
+        return None
+
+    STOP = {"the","a","an","is","are","do","does","what","how","can","i","you","my","to","for","of","in","on","at","with","this","that","it","as","be","by","or","and","not","no","yes","please","help","me","tell","about"}
+
+    def tokens(text):
+        return [w.strip(".,?!;:'\"") for w in text.lower().split() if w.strip(".,?!;:'\"") and w.strip(".,?!;:'\"") not in STOP and len(w) > 2]
+
+    q_tokens = set(tokens(question))
+    if not q_tokens:
+        return None
+
+    scored = []
     for e in entries:
-        text = (e["question"] + " " + " ".join(e.get("tags", []))).lower()
-        words = set(w for w in text.split() if len(w) > 2)
-        score = len(q_words & words)
-        if score > best_score:
-            best_score = score
-            best = e
-    if best and best_score >= 1:
-        return best
+        kb_text = e["question"] + " " + " ".join(e.get("tags", []))
+        kb_tokens = set(tokens(kb_text))
+        if not kb_tokens:
+            continue
+        # Jaccard + coverage of user tokens
+        overlap = q_tokens & kb_tokens
+        union = q_tokens | kb_tokens
+        if not overlap:
+            continue
+        jaccard = len(overlap) / len(union)
+        coverage = len(overlap) / max(len(q_tokens), 1)  # how much of user question is matched
+        kb_coverage = len(overlap) / max(len(kb_tokens), 1)  # how much of KB question is matched
+        score = (jaccard * 0.4) + (coverage * 0.3) + (kb_coverage * 0.3)
+        scored.append((score, jaccard, coverage, e))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda x: -x[0])
+    top_score, top_jacc, top_cov, top_entry = scored[0]
+
+    # Very confident match
+    if top_score >= 0.55 and top_cov >= 0.6:
+        return {"match": top_entry}
+
+    # Candidate cluster: multiple decent matches → ask user to clarify
+    candidates = [e for s, _, _, e in scored[:4] if s >= 0.20]
+    if len(candidates) >= 1 and top_score < 0.55:
+        return {"clarify": candidates}
+
     return None
 
 @api.post("/ai/chat")
@@ -418,15 +455,33 @@ async def ai_chat(payload: ChatIn):
                 "from_kb": False, "no_answer": False, "video_url": None}
 
     kb_hit = await search_kb(q, payload.language)
-    if kb_hit:
-        ans = kb_hit.get("answers", {}).get(payload.language) or kb_hit.get("answers", {}).get("en") or ""
+
+    # Clarification flow — ambiguous match, ask user to pick
+    if kb_hit and "clarify" in kb_hit:
+        candidates = kb_hit["clarify"]
+        clarify_text = {
+            "en": "I'm not 100% sure. Did you mean one of these?",
+            "hi": "मुझे पूरी तरह से समझ नहीं आया। क्या आपका मतलब इनमें से कुछ है?",
+            "gu": "મને બરાબર સમજાયું નથી. શું તમારો અર્થ આમાંથી કોઈ છે?",
+            "mr": "मला पूर्ण समजले नाही. यापैकी काही म्हणायचे आहे का?",
+        }
+        return {
+            "answer": clarify_text.get(payload.language, clarify_text["en"]),
+            "clarify": True,
+            "candidates": [{"question": c["question"], "id": c["id"]} for c in candidates],
+            "from_kb": False, "no_answer": False, "video_url": None, "linked_mini_demo_id": None,
+        }
+
+    if kb_hit and "match" in kb_hit:
+        e = kb_hit["match"]
+        ans = e.get("answers", {}).get(payload.language) or e.get("answers", {}).get("en") or ""
         return {
             "answer": ans,
-            "linked_mini_demo_id": kb_hit.get("linked_mini_demo_id"),
-            "video_url": kb_hit.get("video_url"),
-            "video_start": kb_hit.get("video_start"),
-            "video_end": kb_hit.get("video_end"),
-            "kb_question": kb_hit.get("question"),
+            "linked_mini_demo_id": e.get("linked_mini_demo_id"),
+            "video_url": e.get("video_url"),
+            "video_start": e.get("video_start"),
+            "video_end": e.get("video_end"),
+            "kb_question": e.get("question"),
             "from_kb": True,
             "no_answer": False
         }

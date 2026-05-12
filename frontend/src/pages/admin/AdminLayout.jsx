@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Outlet, useNavigate, NavLink } from "react-router-dom";
 import api from "../../lib/api";
-import { Video, Workflow, BookOpen, BarChart3, Settings, ListChecks, LogOut, Sparkles, LayoutDashboard, Map, HelpCircle, Cog } from "lucide-react";
+import { Video, Workflow, BookOpen, BarChart3, Settings, ListChecks, LogOut, LayoutDashboard, Map, HelpCircle, Cog } from "lucide-react";
 import { Button } from "../../components/ui/button";
 
 export default function AdminLayout() {
@@ -27,7 +27,6 @@ export default function AdminLayout() {
     { to: "/admin/coverage", icon: Map, label: "Coverage" },
     { to: "/admin/kb", icon: BookOpen, label: "Knowledge Base" },
     { to: "/admin/unanswered", icon: HelpCircle, label: "Unanswered" },
-    { to: "/admin/mini-demos", icon: Sparkles, label: "Mini-Demos" },
     { to: "/admin/quiz-options", icon: ListChecks, label: "Quiz Options" },
     { to: "/admin/analytics", icon: BarChart3, label: "Analytics" },
     { to: "/admin/settings", icon: Cog, label: "Settings" },

@@ -21,7 +21,6 @@ import VideoEditor from "./pages/admin/VideoEditor";
 import FlowsPage from "./pages/admin/FlowsPage";
 import CoveragePage from "./pages/admin/CoveragePage";
 import KBPage from "./pages/admin/KBPage";
-import MiniDemosPage from "./pages/admin/MiniDemosPage";
 import QuizOptionsPage from "./pages/admin/QuizOptionsPage";
 import AnalyticsPage from "./pages/admin/AnalyticsPage";
 import UnansweredPage from "./pages/admin/UnansweredPage";
@@ -50,7 +49,6 @@ function Router() {
         <Route path="flows" element={<FlowsPage />} />
         <Route path="coverage" element={<CoveragePage />} />
         <Route path="kb" element={<KBPage />} />
-        <Route path="mini-demos" element={<MiniDemosPage />} />
         <Route path="quiz-options" element={<QuizOptionsPage />} />
         <Route path="analytics" element={<AnalyticsPage />} />
         <Route path="unanswered" element={<UnansweredPage />} />
