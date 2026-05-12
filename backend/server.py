@@ -9,6 +9,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
+from emergentintegrations.llm.chat import LlmChat, UserMessage
+import re as _re
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -164,13 +166,10 @@ class KBEntryIn(BaseModel):
     question: str
     answers: Dict[str, str] = {}  # lang -> answer
     tags: List[str] = []
-    linked_mini_demo_id: Optional[str] = None
+    video_url: Optional[str] = None
+    video_start: Optional[float] = None
+    video_end: Optional[float] = None
     active: bool = True
-
-class MiniDemoIn(BaseModel):
-    name: str
-    module_video_id: Optional[str] = None
-    steps: List[Dict[str, Any]] = []  # [{narration:{lang:txt}, target, action, duration}]
 
 class QuizOptionsIn(BaseModel):
     business_types: List[Dict[str, Any]]  # [{key, label:{lang:txt}}]
@@ -381,112 +380,187 @@ async def session_start():
     })
     return {"session_id": sid}
 
-# ========== AI Chat (KB + LLM) ==========
-async def search_kb(question: str, lang: str):
-    """Smart KB search: returns either:
-    - {match: kb_entry, confidence: high} if very confident
-    - {clarify: [kb_entries]} if multiple candidates need disambiguation
-    - None if no decent match
+# ========== AI Chat (GPT-5.2 grounded in KB) ==========
+LANG_NAMES = {"en": "English", "hi": "Hindi", "gu": "Gujarati", "mr": "Marathi"}
+
+def _parse_llm_json(raw: str) -> Dict[str, Any]:
+    """Best-effort JSON extraction from an LLM response."""
+    if not raw:
+        return {}
+    raw = raw.strip()
+    # Strip code fences if present
+    if raw.startswith("```"):
+        raw = _re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = _re.sub(r"\s*```$", "", raw)
+    # Find first {...} block
+    m = _re.search(r"\{[\s\S]*\}", raw)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return {}
+
+async def llm_match_kb(question: str, kb_entries: List[Dict[str, Any]], lang: str) -> Dict[str, Any]:
+    """Use GPT-5.2 to pick the best KB match.
+
+    Returns one of:
+      {"status": "match", "kb_id": "..."}
+      {"status": "ambiguous", "candidate_ids": [...], "clarify_question": "..."}
+      {"status": "none"}
     """
-    q_lower = question.lower().strip()
-    entries = await db.kb_entries.find({"active": True}, {"_id": 0}).to_list(500)
-    if not entries:
-        return None
+    if not kb_entries:
+        return {"status": "none"}
 
-    STOP = {"the","a","an","is","are","do","does","what","how","can","i","you","my","to","for","of","in","on","at","with","this","that","it","as","be","by","or","and","not","no","yes","please","help","me","tell","about"}
+    # Build compact KB list for the prompt (include answer snippet so the model can match on substance)
+    kb_lines = []
+    for e in kb_entries:
+        tags = ", ".join(e.get("tags", []) or [])
+        ans_en = (e.get("answers") or {}).get("en") or next(iter((e.get("answers") or {}).values()), "")
+        ans_snip = (ans_en or "").replace("\n", " ").strip()
+        if len(ans_snip) > 220:
+            ans_snip = ans_snip[:220] + "…"
+        kb_lines.append(
+            f'- id: {e["id"]}\n  question: "{e["question"]}"\n  tags: [{tags}]\n  answer_snippet: "{ans_snip}"'
+        )
+    kb_block = "\n".join(kb_lines)
 
-    def tokens(text):
-        return [w.strip(".,?!;:'\"") for w in text.lower().split() if w.strip(".,?!;:'\"") and w.strip(".,?!;:'\"") not in STOP and len(w) > 2]
+    system_msg = (
+        "You are a semantic router for a SaaS product called Biziverse. "
+        "You receive a user question and a list of Knowledge Base (KB) entries (each has a question, tags, and an answer snippet). "
+        "Your job is to decide which KB entry — if any — answers the user's question.\n\n"
+        "Rules:\n"
+        "1. Match on TOPIC and INTENT, not just shared words. A KB entry matches if its answer_snippet covers the topic the user is asking about.\n"
+        "2. If the answer_snippet clearly addresses the user's question (even if the KB question is phrased differently), choose status='match'.\n"
+        "3. If 2-3 KB entries could plausibly answer it and you genuinely can't tell which one, choose status='ambiguous' and provide a short clarifying question.\n"
+        "4. If NO KB entry's answer_snippet covers the user's topic, choose status='none'. Do not invent.\n"
+        "5. A single shared keyword is NOT enough — there must be topical alignment with the answer.\n"
+        f"6. The clarify_question must be in {LANG_NAMES.get(lang, 'English')}.\n"
+        "7. Respond with ONLY a JSON object, no prose, no code fences."
+    )
 
-    q_tokens = set(tokens(question))
-    if not q_tokens:
-        return None
+    user_prompt = (
+        f"USER QUESTION: {question}\n\n"
+        f"KB ENTRIES:\n{kb_block}\n\n"
+        "Output strictly this JSON shape:\n"
+        '{"status":"match"|"ambiguous"|"none", "kb_id":"<id or empty>", '
+        '"candidate_ids":["<id>", ...], "clarify_question":"<text or empty>"}'
+    )
 
-    scored = []
-    for e in entries:
-        kb_text = e["question"] + " " + " ".join(e.get("tags", []))
-        kb_tokens = set(tokens(kb_text))
-        if not kb_tokens:
-            continue
-        # Jaccard + coverage of user tokens
-        overlap = q_tokens & kb_tokens
-        union = q_tokens | kb_tokens
-        if not overlap:
-            continue
-        jaccard = len(overlap) / len(union)
-        coverage = len(overlap) / max(len(q_tokens), 1)  # how much of user question is matched
-        kb_coverage = len(overlap) / max(len(kb_tokens), 1)  # how much of KB question is matched
-        score = (jaccard * 0.4) + (coverage * 0.3) + (kb_coverage * 0.3)
-        scored.append((score, jaccard, coverage, e))
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"kb-match-{uuid.uuid4().hex[:8]}",
+            system_message=system_msg,
+        ).with_model("openai", "gpt-5.2")
+        raw = await chat.send_message(UserMessage(text=user_prompt))
+        data = _parse_llm_json(raw)
+        if data.get("status") in ("match", "ambiguous", "none"):
+            return data
+    except Exception as e:
+        logger.error(f"llm_match_kb failed: {e}")
+    return {"status": "none"}
 
-    if not scored:
-        return None
+async def llm_rephrase_answer(question: str, kb_answer: str, lang: str) -> str:
+    """Rephrase KB answer naturally, grounded strictly in kb_answer.
 
-    scored.sort(key=lambda x: -x[0])
-    top_score, top_jacc, top_cov, top_entry = scored[0]
-
-    # Very confident match
-    if top_score >= 0.55 and top_cov >= 0.6:
-        return {"match": top_entry}
-
-    # Candidate cluster: multiple decent matches → ask user to clarify
-    candidates = [e for s, _, _, e in scored[:4] if s >= 0.20]
-    if len(candidates) >= 1 and top_score < 0.55:
-        return {"clarify": candidates}
-
-    return None
+    The system prompt forbids adding facts not in kb_answer.
+    """
+    if not kb_answer:
+        return ""
+    system_msg = (
+        "You are Biziverse's friendly AI assistant. You will be given the user's question and a "
+        "GROUND TRUTH answer from our knowledge base. Rules:\n"
+        "1. Answer the user in a natural, conversational, helpful tone.\n"
+        "2. STRICTLY stay within the facts in GROUND TRUTH. Do NOT invent features, numbers, prices, or capabilities.\n"
+        "3. You may rephrase, reorder, and simplify, but every claim must be supported by GROUND TRUTH.\n"
+        f"4. Reply in {LANG_NAMES.get(lang, 'English')}.\n"
+        "5. Keep it concise — 1 to 3 short sentences. No greetings, no closing pleasantries, no markdown.\n"
+        "6. Output ONLY the answer text. No prefixes like 'Answer:' or 'Sure!'."
+    )
+    user_prompt = f"USER QUESTION: {question}\n\nGROUND TRUTH:\n{kb_answer}"
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"kb-answer-{uuid.uuid4().hex[:8]}",
+            system_message=system_msg,
+        ).with_model("openai", "gpt-5.2")
+        raw = await chat.send_message(UserMessage(text=user_prompt))
+        return (raw or "").strip()
+    except Exception as e:
+        logger.error(f"llm_rephrase_answer failed: {e}")
+        return kb_answer  # fall back to raw KB answer
 
 @api.post("/ai/chat")
 async def ai_chat(payload: ChatIn):
     q = (payload.message or "").strip()
+    if not q:
+        raise HTTPException(400, "Empty message")
     q_lower = q.lower()
-    lang_names = {"en": "English", "hi": "Hindi", "gu": "Gujarati", "mr": "Marathi"}
 
-    # Strict mode: handle greetings, then KB, otherwise log + return executive prompt
-    greetings = ["hi", "hello", "hey", "namaste", "hii", "helo", "hola", "नमस्ते", "नमस्कार"]
-    if any(q_lower == g or q_lower.startswith(g + " ") or q_lower.startswith(g + ",") for g in greetings):
+    # Quick greeting handler (avoid LLM call for trivial inputs)
+    greetings = {"hi", "hello", "hey", "namaste", "hii", "helo", "hola", "नमस्ते", "नमस्कार"}
+    if q_lower in greetings or len(q_lower) <= 2:
         greet = {
-            "en": "Hi! I can answer questions about Biziverse features. What would you like to know?",
+            "en": "Hi! I can answer questions about Biziverse. What would you like to know?",
             "hi": "नमस्ते! मैं Biziverse के बारे में सवालों के जवाब दे सकता हूँ। आप क्या जानना चाहेंगे?",
             "gu": "નમસ્તે! હું Biziverse વિશે પ્રશ્નોના જવાબ આપી શકું છું.",
-            "mr": "नमस्कार! मी Biziverse विषयी प्रश्नांची उत्तरे देऊ शकतो."
+            "mr": "नमस्कार! मी Biziverse विषयी प्रश्नांची उत्तरे देऊ शकतो.",
         }
-        return {"answer": greet.get(payload.language, greet["en"]), "linked_mini_demo_id": None,
+        return {"answer": greet.get(payload.language, greet["en"]),
                 "from_kb": False, "no_answer": False, "video_url": None}
 
-    kb_hit = await search_kb(q, payload.language)
+    # Load active KB entries
+    kb_entries = await db.kb_entries.find({"active": True}, {"_id": 0}).to_list(500)
+    if not kb_entries:
+        return await _log_and_fallback(payload, q)
 
-    # Clarification flow — ambiguous match, ask user to pick
-    if kb_hit and "clarify" in kb_hit:
-        candidates = kb_hit["clarify"]
-        clarify_text = {
-            "en": "I'm not 100% sure. Did you mean one of these?",
-            "hi": "मुझे पूरी तरह से समझ नहीं आया। क्या आपका मतलब इनमें से कुछ है?",
-            "gu": "મને બરાબર સમજાયું નથી. શું તમારો અર્થ આમાંથી કોઈ છે?",
-            "mr": "मला पूर्ण समजले नाही. यापैकी काही म्हणायचे आहे का?",
-        }
-        return {
-            "answer": clarify_text.get(payload.language, clarify_text["en"]),
-            "clarify": True,
-            "candidates": [{"question": c["question"], "id": c["id"]} for c in candidates],
-            "from_kb": False, "no_answer": False, "video_url": None, "linked_mini_demo_id": None,
-        }
+    # Stage 1: GPT-5.2 semantic match
+    match = await llm_match_kb(q, kb_entries, payload.language)
+    by_id = {e["id"]: e for e in kb_entries}
 
-    if kb_hit and "match" in kb_hit:
-        e = kb_hit["match"]
-        ans = e.get("answers", {}).get(payload.language) or e.get("answers", {}).get("en") or ""
-        return {
-            "answer": ans,
-            "linked_mini_demo_id": e.get("linked_mini_demo_id"),
-            "video_url": e.get("video_url"),
-            "video_start": e.get("video_start"),
-            "video_end": e.get("video_end"),
-            "kb_question": e.get("question"),
-            "from_kb": True,
-            "no_answer": False
-        }
+    if match.get("status") == "match":
+        kb_id = match.get("kb_id")
+        e = by_id.get(kb_id)
+        if e:
+            kb_answer = (e.get("answers") or {}).get(payload.language) or (e.get("answers") or {}).get("en") or ""
+            # Stage 2: rephrase naturally, grounded
+            nat = await llm_rephrase_answer(q, kb_answer, payload.language)
+            return {
+                "answer": nat or kb_answer,
+                "from_kb": True,
+                "no_answer": False,
+                "kb_id": e["id"],
+                "kb_question": e.get("question"),
+                "video_url": e.get("video_url"),
+                "video_start": e.get("video_start"),
+                "video_end": e.get("video_end"),
+            }
+        # Fall through if model returned an unknown id
 
-    # Log unanswered question for admin review
+    if match.get("status") == "ambiguous":
+        cand_ids = match.get("candidate_ids") or []
+        candidates = [by_id[c] for c in cand_ids if c in by_id][:3]
+        if candidates:
+            clarify_q = match.get("clarify_question") or {
+                "en": "Could you clarify what you mean?",
+                "hi": "क्या आप थोड़ा और स्पष्ट कर सकते हैं?",
+                "gu": "શું તમે થોડું વધુ સ્પષ્ટ કરી શકશો?",
+                "mr": "तुम्ही थोडे अधिक स्पष्ट करू शकता का?",
+            }.get(payload.language, "Could you clarify what you mean?")
+            return {
+                "answer": clarify_q,
+                "clarify": True,
+                "candidates": [{"id": c["id"], "question": c["question"]} for c in candidates],
+                "from_kb": False,
+                "no_answer": False,
+                "video_url": None,
+            }
+
+    return await _log_and_fallback(payload, q)
+
+
+async def _log_and_fallback(payload: ChatIn, q: str):
     await db.unanswered_questions.insert_one({
         "id": f"uq_{uuid.uuid4().hex[:10]}",
         "session_id": payload.session_id,
@@ -496,17 +570,16 @@ async def ai_chat(payload: ChatIn):
         "product_category": payload.product_category,
         "modules": payload.modules or [],
         "resolved": False,
-        "created_at": datetime.now(timezone.utc).isoformat()
+        "created_at": datetime.now(timezone.utc).isoformat(),
     })
     fallback = {
         "en": "I don't have an answer for that yet. Would you like to talk with an executive?",
         "hi": "मेरे पास इसका जवाब अभी नहीं है। क्या आप किसी executive से बात करना चाहेंगे?",
         "gu": "મારી પાસે હાલ આ જવાબ નથી. શું તમે executive સાથે વાત કરવા માંગો છો?",
-        "mr": "माझ्याकडे या प्रश्नाचे उत्तर अद्याप नाही. कार्यकारीशी बोलू इच्छिता?"
+        "mr": "माझ्याकडे या प्रश्नाचे उत्तर अद्याप नाही. कार्यकारीशी बोलू इच्छिता?",
     }
     return {"answer": fallback.get(payload.language, fallback["en"]),
-            "linked_mini_demo_id": None, "video_url": None,
-            "from_kb": False, "no_answer": True}
+            "from_kb": False, "no_answer": True, "video_url": None}
 
 # ========== Signup (Mocked OTP + Razorpay) ==========
 @api.post("/signup/otp/send")
@@ -702,37 +775,6 @@ async def delete_kb(kid: str, user=Depends(admin_dep)):
     await db.kb_entries.delete_one({"id": kid})
     return {"ok": True}
 
-# ========== Public Mini-Demos ==========
-@api.get("/mini-demos/{mid}")
-async def get_mini_demo_public(mid: str):
-    m = await db.mini_demos.find_one({"id": mid}, {"_id": 0})
-    if not m:
-        raise HTTPException(404, "Not found")
-    # Attach linked video if any
-    if m.get("module_video_id"):
-        v = await db.module_videos.find_one({"id": m["module_video_id"]}, {"_id": 0})
-        m["video"] = v
-    return m
-
-# ========== Admin: Mini-Demos ==========
-@api.get("/admin/mini-demos")
-async def list_mini_demos(user=Depends(admin_dep)):
-    return await db.mini_demos.find({}, {"_id": 0}).to_list(500)
-
-@api.post("/admin/mini-demos")
-async def create_mini(payload: MiniDemoIn, user=Depends(admin_dep)):
-    mid = f"mini_{uuid.uuid4().hex[:10]}"
-    doc = payload.model_dump()
-    doc.update({"id": mid, "created_at": datetime.now(timezone.utc).isoformat()})
-    await db.mini_demos.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
-
-@api.delete("/admin/mini-demos/{mid}")
-async def delete_mini(mid: str, user=Depends(admin_dep)):
-    await db.mini_demos.delete_one({"id": mid})
-    return {"ok": True}
-
 # ========== Admin: Quiz Options ==========
 @api.get("/admin/quiz-options")
 async def get_quiz_options(user=Depends(admin_dep)):
@@ -885,26 +927,9 @@ async def seed_data():
         await db.kb_entries.insert_one({
             "id": f"kb_{uuid.uuid4().hex[:10]}", "question": k["q"],
             "answers": k["a"], "tags": k["tags"], "active": True,
-            "linked_mini_demo_id": None,
+            "video_url": None, "video_start": None, "video_end": None,
             "created_at": datetime.now(timezone.utc).isoformat()
         })
-
-    # Seed a sample mini-demo and link it to the GST KB entry
-    first_video = await db.module_videos.find_one({"module_key": "sales_invoices"}, {"_id": 0})
-    if first_video:
-        mini_id = f"mini_{uuid.uuid4().hex[:10]}"
-        await db.mini_demos.insert_one({
-            "id": mini_id,
-            "name": "How GST Invoice Works",
-            "module_video_id": first_video["id"],
-            "steps": [],
-            "created_at": datetime.now(timezone.utc).isoformat()
-        })
-        # Link to GST KB entry
-        await db.kb_entries.update_one(
-            {"question": {"$regex": "GST", "$options": "i"}},
-            {"$set": {"linked_mini_demo_id": mini_id}}
-        )
 
     return {"ok": True, "seeded_videos": len(seed_videos), "seeded_kb": len(kb_seed)}
 

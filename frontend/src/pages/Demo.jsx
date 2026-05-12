@@ -286,14 +286,7 @@ export default function Demo() {
     trackEvent("kb_video_played", { topic, videoUrl });
   };
 
-  const playMiniDemo = async (miniId, topic = "") => {
-    try {
-      const r = await api.get(`/mini-demos/${miniId}`);
-      const v = r.data?.video;
-      if (!v) return;
-      playKBVideo(v.video_url, topic);
-    } catch (e) { console.error(e); }
-  };
+  const playMiniDemo = (videoUrl, topic = "") => playKBVideo(videoUrl, topic);
 
   const exitMiniDemo = () => {
     voice.stop();
@@ -323,19 +316,56 @@ export default function Demo() {
       const ans = r.data.answer || "";
       const videoUrl = r.data.video_url;
       const noAnswer = r.data.no_answer;
+      const clarify = r.data.clarify;
+      const candidates = r.data.candidates || [];
       const msg = { role: "ai", text: ans };
       if (noAnswer) msg.exec_cta = true;
+      if (clarify && candidates.length) {
+        msg.clarify = true;
+        msg.candidates = candidates;
+      }
       setChat(c => [...c, msg]);
       if (videoUrl) {
         setPendingMini({ video_url: videoUrl, topic: q, start: r.data.video_start, end: r.data.video_end });
         setChat(c => [...c, { role: "ai", text: "Want me to show you how this works?", prompt: "show_me", video_url: videoUrl, topic: q, video_start: r.data.video_start, video_end: r.data.video_end }]);
-      } else if (!noAnswer) {
+      } else if (!noAnswer && !clarify) {
         if (!tryYourselfMode && playing) doPlay();
       }
     } catch (e) {
       setChat(c => [...c, { role: "ai", text: "I'm having trouble answering right now. Please try again." }]);
     }
     setChatLoading(false);
+  };
+
+  const pickClarifyCandidate = (cand) => {
+    setChatInput(cand.question);
+    setTimeout(() => {
+      setChatInput("");
+      setChat(c => [...c, { role: "user", text: cand.question }]);
+      setChatLoading(true);
+      (async () => {
+        try {
+          const r = await api.post("/ai/chat", {
+            session_id: sessionId, message: cand.question, language: lang,
+            business_type: quiz?.bt, product_category: quiz?.pc,
+            modules: quiz?.mods || [], current_step: vidIdx
+          });
+          const ans = r.data.answer || "";
+          const videoUrl = r.data.video_url;
+          const noAnswer = r.data.no_answer;
+          const msg = { role: "ai", text: ans };
+          if (noAnswer) msg.exec_cta = true;
+          setChat(c => [...c, msg]);
+          if (videoUrl) {
+            setPendingMini({ video_url: videoUrl, topic: cand.question, start: r.data.video_start, end: r.data.video_end });
+            setChat(c => [...c, { role: "ai", text: "Want me to show you how this works?", prompt: "show_me", video_url: videoUrl, topic: cand.question, video_start: r.data.video_start, video_end: r.data.video_end }]);
+          }
+        } catch (e) {
+          setChat(c => [...c, { role: "ai", text: "I'm having trouble answering right now. Please try again." }]);
+        }
+        setChatLoading(false);
+      })();
+    }, 10);
   };
 
   const acceptShowMe = (m) => playKBVideo(m.video_url, m.topic, m.video_start, m.video_end);
@@ -362,7 +392,7 @@ export default function Demo() {
               <span className="text-xs uppercase tracking-widest text-orange-600 font-bold border-l pl-3">Live Demo</span>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <div className="hidden md:flex items-center text-xs text-slate-500 mr-2">{currentVideo?.title}{inMiniDemo && " · Mini-demo"}</div>
+              <div className="hidden md:flex items-center text-xs text-slate-500 mr-2">{currentVideo?.title}{inMiniDemo && " · Showing answer"}</div>
               <select data-testid="demo-lang-select" value={lang} onChange={e=>setLang(e.target.value)} className="text-sm border border-slate-200 rounded-full px-3 py-1.5 bg-white">
                 {LANGS.map(l=><option key={l.code} value={l.code}>{l.native}</option>)}
               </select>
@@ -432,7 +462,7 @@ export default function Demo() {
               <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30">
                 <div className="px-4 py-1.5 bg-slate-950/70 backdrop-blur-md text-white rounded-full text-xs font-bold tracking-wider uppercase border border-white/10 flex items-center gap-2">
                   <span className="h-1.5 w-1.5 rounded-full bg-orange-500 animate-pulse" />
-                  {inMiniDemo ? `Mini-demo · ${miniDemoTopic || currentVideo.title}` : currentVideo.title}
+                  {inMiniDemo ? `${miniDemoTopic || currentVideo.title}` : currentVideo.title}
                 </div>
               </div>
             )}
@@ -557,7 +587,7 @@ export default function Demo() {
           <aside className="lg:col-span-4 bg-white border border-slate-200 rounded-2xl flex flex-col h-[calc(100vh-180px)] sticky top-[72px]">
             <ChatHeader lang={lang} />
             <ChatBody chat={chat} chatLoading={chatLoading} chatEndRef={chatEndRef} lang={lang}
-              onAccept={acceptShowMe} onDecline={declineShowMe} />
+              onAccept={acceptShowMe} onDecline={declineShowMe} onClarifyPick={pickClarifyCandidate} />
             <ChatInput lang={lang} chatInput={chatInput} setChatInput={setChatInput} send={sendChat} />
           </aside>
         ) : (
@@ -572,7 +602,7 @@ export default function Demo() {
                 <button onClick={()=>setChatOpen(false)} className="text-slate-400 hover:text-slate-600"><X className="h-4 w-4" /></button>
               </div>
               <ChatBody chat={chat} chatLoading={chatLoading} chatEndRef={chatEndRef} lang={lang}
-                onAccept={acceptShowMe} onDecline={declineShowMe} />
+                onAccept={acceptShowMe} onDecline={declineShowMe} onClarifyPick={pickClarifyCandidate} />
               <ChatInput lang={lang} chatInput={chatInput} setChatInput={setChatInput} send={sendChat} />
             </div>
           ) : (
@@ -701,7 +731,7 @@ function ChatHeader({ lang }) {
   );
 }
 
-function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, settings }) {
+function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, onClarifyPick, settings }) {
   const openExec = () => {
     const ev = new CustomEvent("biz-open-callback");
     window.dispatchEvent(ev);
@@ -719,6 +749,18 @@ function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, se
           {m.exec_cta && (
             <div className="flex gap-2 mt-2">
               <Button data-testid="exec-cta" size="sm" onClick={openExec} className="bg-secondary hover:bg-secondary/90 text-white rounded-full text-xs h-8">Talk with executive</Button>
+            </div>
+          )}
+          {m.clarify && m.candidates && m.candidates.length > 0 && (
+            <div className="flex flex-col gap-1.5 mt-2.5">
+              {m.candidates.map((c, idx) => (
+                <button key={idx}
+                  data-testid={`clarify-candidate-${idx}`}
+                  onClick={() => onClarifyPick && onClarifyPick(c)}
+                  className="text-left text-xs bg-white hover:bg-orange-50 border border-orange-200 hover:border-orange-400 text-secondary px-3 py-2 rounded-xl transition-colors">
+                  {c.question}
+                </button>
+              ))}
             </div>
           )}
           {m.prompt === "show_me" && (
