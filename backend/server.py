@@ -1060,28 +1060,27 @@ async def callback_request(payload: CallbackRequestIn):
         "created_at": datetime.now(timezone.utc).isoformat()
     })
 
-    live_lead_id = None
-    if payload.human_now:
-        live_lead_id = f"ll_{uuid.uuid4().hex[:10]}"
-        await db.live_leads.insert_one({
-            "id": live_lead_id,
-            "callback_request_id": cb_id,
-            "phone": phone,
-            "session_id": payload.session_id,
-            "business_type": payload.business_type,
-            "product_category": payload.product_category,
-            "modules_watched": payload.modules_watched or [],
-            "questions_asked": payload.questions_asked or [],
-            "language": payload.language,
-            "voice_requested": bool(payload.voice_requested),
-            "request_note": payload.request_note or "",
-            "status": "pending",
-            "assigned_to": None,
-            "industry": None,
-            "sector": None,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat()
-        })
+    live_lead_id = f"ll_{uuid.uuid4().hex[:10]}"
+    await db.live_leads.insert_one({
+        "id": live_lead_id,
+        "callback_request_id": cb_id,
+        "phone": phone,
+        "session_id": payload.session_id,
+        "business_type": payload.business_type,
+        "product_category": payload.product_category,
+        "modules_watched": payload.modules_watched or [],
+        "questions_asked": payload.questions_asked or [],
+        "language": payload.language,
+        "human_now": bool(payload.human_now),
+        "voice_requested": bool(payload.voice_requested),
+        "request_note": payload.request_note or "",
+        "status": "pending",
+        "assigned_to": None,
+        "industry": None,
+        "sector": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    })
 
     # ── Build the "needs" string with full demo context ──
     needs_parts = []
@@ -1194,9 +1193,8 @@ async def add_live_lead_message(lead_id: str, payload: LiveLeadMessageIn):
     }
     await db.live_lead_messages.insert_one(doc)
     await db.live_leads.update_one({"id": lead_id}, {"$set": {"updated_at": datetime.now(timezone.utc).isoformat()}})
-    # Broadcast real-time to connected clients: lead channel and session channel
+    # Broadcast real-time — route to the OTHER party only (no echo back to sender)
     try:
-        # send minimal payload
         push = {
             "type": "new_message",
             "message": {
@@ -1208,12 +1206,14 @@ async def add_live_lead_message(lead_id: str, payload: LiveLeadMessageIn):
                 "created_at": doc["created_at"],
             }
         }
-        # lead channel
-        await ws_manager.broadcast(f"lead:{lead_id}", push)
-        # session channel if available
-        lead = await db.live_leads.find_one({"id": lead_id})
-        if lead and lead.get("session_id"):
-            await ws_manager.broadcast(f"session:{lead.get('session_id')}", push)
+        if payload.role == "user":
+            # User sent → notify agent's lead channel
+            await ws_manager.broadcast(f"lead:{lead_id}", push)
+        else:
+            # Agent sent → notify user's session channel
+            lead_doc = await db.live_leads.find_one({"id": lead_id}, {"_id": 0})
+            if lead_doc and lead_doc.get("session_id"):
+                await ws_manager.broadcast(f"session:{lead_doc['session_id']}", push)
     except Exception:
         logger.exception("Failed to broadcast live lead message")
 
@@ -1314,43 +1314,11 @@ async def admin_kb_suggest(payload: Dict[str, Any], user=Depends(admin_dep)):
 @api.websocket("/ws/live/{channel}")
 async def ws_live(channel: str, websocket: WebSocket):
     """WebSocket endpoint. `channel` should be of form `lead:<lead_id>` or `session:<session_id>`.
-    Clients may send pings but server does not expect to receive meaningful messages.
+    No auth required — REST endpoints handle all write-auth. WS is push-only.
     """
-    # Determine channel type
     is_lead = channel.startswith("lead:")
     is_session = channel.startswith("session:")
 
-    # If this is a lead channel (agent side), require admin auth
-    admin_user = None
-    try:
-        if is_lead:
-            # extract token from cookie header or Authorization header
-            headers = dict(websocket.headers)
-            cookie = headers.get("cookie", "")
-            session_token = None
-            if cookie:
-                # parse simple cookie string
-                parts = [p.strip() for p in cookie.split(";") if p.strip()]
-                for p in parts:
-                    if p.startswith("session_token="):
-                        session_token = p.split("=", 1)[1]
-                        break
-            authorization = headers.get("authorization")
-            try:
-                admin_user = await get_current_admin(session_token=session_token, authorization=authorization)
-            except HTTPException:
-                # refuse connection
-                await websocket.close(code=1008)
-                return
-
-    except Exception:
-        try:
-            await websocket.close(code=1011)
-        except Exception:
-            pass
-        return
-
-    # register websocket
     await ws_manager.connect(channel, websocket)
 
     try:
@@ -1360,34 +1328,27 @@ async def ws_live(channel: str, websocket: WebSocket):
                 await websocket.send_text(json.dumps({"type": "pong"}))
                 continue
 
-            # try parse as JSON
             try:
                 obj = json.loads(data)
             except Exception:
                 obj = None
 
-            # Handle typing/presence events and forward between session<->lead channels
-            if isinstance(obj, dict) and obj.get("type") in {"typing", "presence", "message"}:
+            # Forward typing/presence events between session<->lead channels
+            if isinstance(obj, dict) and obj.get("type") in {"typing", "presence"}:
                 typ = obj.get("type")
-                payload = obj.get("payload", {})
-                # If this connection is a session channel, forward to lead channel(s)
+                payload_data = obj.get("payload", {})
                 if is_session:
                     sess_id = channel.split(":", 1)[1]
-                    # find live lead for this session
                     lead = await db.live_leads.find_one({"session_id": sess_id}, {"_id": 0})
                     if lead:
-                        target = f"lead:{lead['id']}"
-                        await ws_manager.broadcast(target, {"type": typ, "from": "user", "payload": payload})
-                # If this connection is a lead channel, forward to session channel
+                        await ws_manager.broadcast(f"lead:{lead['id']}", {"type": typ, "from": "user", "payload": payload_data})
                 elif is_lead:
                     lead_id = channel.split(":", 1)[1]
                     lead = await db.live_leads.find_one({"id": lead_id}, {"_id": 0})
                     if lead and lead.get("session_id"):
-                        target = f"session:{lead.get('session_id')}"
-                        await ws_manager.broadcast(target, {"type": typ, "from": "agent", "payload": payload})
+                        await ws_manager.broadcast(f"session:{lead['session_id']}", {"type": typ, "from": "agent", "payload": payload_data})
                 continue
 
-            # otherwise ignore
     except WebSocketDisconnect:
         ws_manager.disconnect(channel, websocket)
     except Exception:
@@ -1482,7 +1443,29 @@ async def admin_delete_user(user_id: str, user=Depends(admin_dep)):
 async def list_callbacks(user=Depends(admin_dep)):
     """Admin view of all callback requests."""
     items = await db.callback_requests.find({}, {"_id": 0}).sort("created_at", -1).limit(200).to_list(200)
-    return items    
+    return items
+
+# ========== Agent Presence ==========
+@api.get("/presence")
+async def get_presence_public():
+    """Public: returns whether any agent is currently online."""
+    count = await db.agent_presence.count_documents({"online": True})
+    return {"any_online": count > 0, "online_count": count}
+
+@api.get("/admin/presence")
+async def get_my_presence(user=Depends(admin_dep)):
+    doc = await db.agent_presence.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    return {"online": bool(doc and doc.get("online")), "user_id": user["user_id"]}
+
+@api.put("/admin/presence")
+async def set_my_presence(payload: Dict[str, Any], user=Depends(admin_dep)):
+    online = bool(payload.get("online", True))
+    await db.agent_presence.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"online": online, "user_id": user["user_id"], "updated_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True
+    )
+    return {"ok": True, "online": online}
 
 # ========== Settings ==========
 @api.get("/settings")

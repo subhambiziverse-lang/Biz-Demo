@@ -7,7 +7,7 @@ import { voice } from "../lib/voice";
 import api from "../lib/api";
 import {
   Pause, Play, ExternalLink, Volume2, VolumeX, Send, Sparkles,
-  ArrowLeft, Maximize2, Minimize2, X, MessageCircle, Subtitles
+  ArrowLeft, Maximize2, Minimize2, X, MessageCircle, Subtitles, UserCheck
 } from "lucide-react";
 import { loadYouTubeAPI, extractYouTubeId, isYouTube } from "../lib/youtube";
 
@@ -258,51 +258,63 @@ export default function Demo() {
   useEffect(() => { voice.setEnabled(voiceOn); }, [voiceOn]);
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
 
-  // Poll demo session for live lead/agent availability
+  // WebSocket for real-time agent events
   useEffect(() => {
-    // connect websocket to listen for agent events and messages for this session
     if (!sessionId) return;
-    // Use REACT_APP_BACKEND_URL so we hit the backend host, not the frontend host.
     const backendBase = process.env.REACT_APP_BACKEND_URL || window.location.origin;
     const wsBase = backendBase.replace(/^http/i, "ws");
     const url = `${wsBase}/api/ws/live/session:${sessionId}`;
     try {
       const ws = new WebSocket(url);
       wsRef.current = ws;
-      ws.onopen = () => { /* console.log('ws open') */ };
       ws.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data);
           if (data.type === 'agent_joined') {
             setAgentLive(true);
-            // optionally append a system chat message
-            setChat(c => [...c, { role: 'agent', text: `Agent ${data.agent?.name || data.agent?.user_id} joined.`, system: true }]);
+            setChat(c => [...c, { _id: `sys_${Date.now()}`, role: 'system', text: `Agent ${data.agent?.name || 'Support'} joined the chat.` }]);
           }
-          if (data.type === 'new_message' && data.message) {
+          // Only process agent messages — user messages are added optimistically
+          if (data.type === 'new_message' && data.message && data.message.role === 'agent') {
             const m = data.message;
             setChat(c => {
-              // Dedupe: if last message has same role & text within 5s, skip (own echo)
-              const last = c[c.length - 1];
-              if (last && last.role === (m.role === 'user' ? 'user' : 'agent') && last.text === m.text) {
-                return c;
-              }
-              return [...c, { role: m.role === 'user' ? 'user' : 'agent', text: m.text, created_at: m.created_at }];
+              if (c.some(x => x._id === m.id)) return c;
+              return [...c, { _id: m.id, role: 'agent', text: m.text, created_at: m.created_at }];
             });
           }
           if (data.type === 'typing' && data.from === 'agent') {
             setAgentTyping(true);
-            setTimeout(() => setAgentTyping(false), 1400);
+            setTimeout(() => setAgentTyping(false), 2000);
           }
-        } catch (e) { console.error(e); }
+        } catch (e) {}
       };
-      ws.onclose = () => { setAgentLive(false); };
-      ws.onerror = (e) => { console.warn('public ws error', e); };
-    } catch (e) {
-      console.error('ws connect failed', e);
-    }
-    // no polling — rely on websocket events only
+      ws.onclose = () => {};
+      ws.onerror = () => {};
+    } catch (e) {}
     return () => { if (wsRef.current) { try { wsRef.current.close(); } catch (e) {} } };
   }, [sessionId]);
+
+  // Polling fallback for agent messages when live — catches missed WS events
+  useEffect(() => {
+    if (!agentLive || !activeLeadId) return;
+    const poll = async () => {
+      try {
+        const r = await api.get(`/live-leads/${activeLeadId}/messages`);
+        const agentMsgs = (r.data || []).filter(m => m.role === 'agent');
+        setChat(c => {
+          const existingIds = new Set(c.map(m => m._id).filter(Boolean));
+          const newMsgs = agentMsgs
+            .filter(m => !existingIds.has(m.id))
+            .map(m => ({ _id: m.id, role: 'agent', text: m.text, created_at: m.created_at }));
+          if (!newMsgs.length) return c;
+          return [...c, ...newMsgs].sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+        });
+      } catch (e) {}
+    };
+    poll();
+    const iv = setInterval(poll, 5000);
+    return () => clearInterval(iv);
+  }, [agentLive, activeLeadId]);
 
   // Center active module chip
   useEffect(() => {
@@ -636,7 +648,8 @@ export default function Demo() {
     if (!chatInput.trim()) return;
     const q = chatInput.trim();
     setQuestionsAsked(prev => [...new Set([...prev, q])]);
-    setChat(c => [...c, { role: "user", text: q }]);
+    const tempId = `user_${Date.now()}`;
+    setChat(c => [...c, { _id: tempId, role: "user", text: q }]);
     setChatInput("");
 
     // If a human agent is live on this session, route the message to the agent (skip AI)
@@ -1245,18 +1258,22 @@ function ChatHeader({ lang, agentLive, setChatOpen }) {
   return (
     <div className="px-5 py-4 border-b border-slate-200 flex items-center gap-2 justify-between">
       <div className="flex items-center gap-2">
-        <div className="h-9 w-9 rounded-full bg-orange-100 grid place-items-center">
-          <Sparkles className="h-4 w-4 text-orange-600" />
+        <div className={`h-9 w-9 rounded-full grid place-items-center ${agentLive ? 'bg-emerald-100' : 'bg-orange-100'}`}>
+          {agentLive
+            ? <UserCheck className="h-4 w-4 text-emerald-600" />
+            : <Sparkles className="h-4 w-4 text-orange-600" />
+          }
         </div>
         <div>
-          <div className="font-display font-bold text-secondary">Biziverse AI</div>
+          <div className="font-display font-bold text-secondary">{agentLive ? 'Live Support' : 'Biziverse AI'}</div>
           <div className={`text-xs flex items-center gap-1.5 ${agentLive ? 'text-emerald-600' : 'text-slate-500'}`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${agentLive ? 'bg-emerald-500' : 'bg-slate-300'}`} /> {agentLive ? 'Agent available' : 'AI only'}
+            <span className={`h-1.5 w-1.5 rounded-full ${agentLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
+            {agentLive ? 'Agent is online' : 'AI assistant'}
           </div>
         </div>
       </div>
       <div className="flex items-center gap-2">
-        <button onClick={() => setChatOpen(false)} className="text-sm px-2 py-1 rounded bg-slate-50 border">Close</button>
+        <button onClick={() => setChatOpen(false)} className="text-sm px-2 py-1 rounded bg-slate-50 border text-slate-500 hover:bg-slate-100">Close</button>
       </div>
     </div>
   );
@@ -1265,53 +1282,94 @@ function ChatHeader({ lang, agentLive, setChatOpen }) {
 function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, onClarifyPick, agentTyping }) {
   const openExec = () => window.dispatchEvent(new CustomEvent("biz-open-callback"));
   return (
-    <div className="flex-1 overflow-y-auto thin-scroll px-5 py-4 space-y-3">
+    <div className="flex-1 overflow-y-auto thin-scroll px-4 py-4 space-y-2">
       {chat.length === 0 && (
         <div className="text-sm text-slate-500 bg-slate-50 rounded-xl p-3 border border-slate-200">
           Hi! Ask me anything about Biziverse — I'll answer from our knowledge base. Try <em>"Does this support GST?"</em>
         </div>
       )}
-      {chat.map((m, i) => (
-        <div
-          key={i}
-          className={`text-sm ${m.role === "user" ? "ml-auto bg-orange-600 text-white" : "bg-slate-100 text-slate-800"} max-w-[90%] rounded-2xl px-4 py-2.5`}
-        >
-          <div>{m.text}</div>
-          {m.exec_cta && (
-            <div className="flex gap-2 mt-2">
-              <Button data-testid="exec-cta" size="sm" onClick={openExec} className="bg-secondary hover:bg-secondary/90 text-white rounded-full text-xs h-8">
-                Talk with executive
-              </Button>
+      {chat.map((m, i) => {
+        // System messages (agent joined notice)
+        if (m.role === 'system') {
+          return (
+            <div key={m._id || i} className="flex justify-center my-2">
+              <span className="text-[11px] text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full">{m.text}</span>
             </div>
-          )}
-          {m.clarify && m.candidates && m.candidates.length > 0 && (
-            <div className="flex flex-col gap-1.5 mt-2.5">
-              {m.candidates.map((c, idx) => (
-                <button
-                  key={idx}
-                  data-testid={`clarify-candidate-${idx}`}
-                  onClick={() => onClarifyPick && onClarifyPick(c)}
-                  className="text-left text-xs bg-white hover:bg-orange-50 border border-orange-200 hover:border-orange-400 text-secondary px-3 py-2 rounded-xl transition-colors"
-                >
-                  {c.question}
-                </button>
+          );
+        }
+        return (
+          <div
+            key={m._id || i}
+            className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+          >
+            <div className={`text-sm max-w-[88%] rounded-2xl px-4 py-2.5 ${
+              m.role === "user"
+                ? "bg-orange-600 text-white rounded-tr-sm"
+                : "bg-slate-100 text-slate-800 rounded-tl-sm"
+            }`}>
+              <div className="leading-relaxed">{m.text}</div>
+              {m.exec_cta && (
+                <div className="flex gap-2 mt-2">
+                  <Button data-testid="exec-cta" size="sm" onClick={openExec} className="bg-secondary hover:bg-secondary/90 text-white rounded-full text-xs h-8">
+                    Talk with executive
+                  </Button>
+                </div>
+              )}
+              {m.clarify && m.candidates && m.candidates.length > 0 && (
+                <div className="flex flex-col gap-1.5 mt-2.5">
+                  {m.candidates.map((c, idx) => (
+                    <button
+                      key={idx}
+                      data-testid={`clarify-candidate-${idx}`}
+                      onClick={() => onClarifyPick && onClarifyPick(c)}
+                      className="text-left text-xs bg-white hover:bg-orange-50 border border-orange-200 hover:border-orange-400 text-secondary px-3 py-2 rounded-xl transition-colors"
+                    >
+                      {c.question}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {m.prompt === "show_me" && (
+                <div className="flex gap-2 mt-2">
+                  <Button data-testid="show-me-yes" size="sm" onClick={() => onAccept(m)} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs h-8">
+                    Show me
+                  </Button>
+                  <Button data-testid="show-me-no" size="sm" variant="outline" onClick={onDecline} className="rounded-full text-xs h-8">
+                    No, thanks
+                  </Button>
+                </div>
+              )}
+              {m.created_at && (
+                <div className={`text-[10px] mt-1 ${m.role === 'user' ? 'text-white/50 text-right' : 'text-slate-400'}`}>
+                  {new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      {chatLoading && (
+        <div className="flex justify-start">
+          <div className="bg-slate-100 rounded-2xl rounded-tl-sm px-4 py-2.5">
+            <div className="flex gap-1 items-center h-4">
+              {[0, 150, 300].map(d => (
+                <span key={d} className="h-2 w-2 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: `${d}ms`, animationDuration: "0.9s" }} />
               ))}
             </div>
-          )}
-          {m.prompt === "show_me" && (
-            <div className="flex gap-2 mt-2">
-              <Button data-testid="show-me-yes" size="sm" onClick={() => onAccept(m)} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs h-8">
-                Show me
-              </Button>
-              <Button data-testid="show-me-no" size="sm" variant="outline" onClick={onDecline} className="rounded-full text-xs h-8">
-                No, thanks
-              </Button>
-            </div>
-          )}
+          </div>
         </div>
-      ))}
-      {chatLoading && <div className="text-xs text-slate-500">AI is thinking…</div>}
-      {agentTyping && <div className="text-sm text-slate-500 italic">Agent is typing…</div>}
+      )}
+      {agentTyping && (
+        <div className="flex justify-start">
+          <div className="bg-slate-100 rounded-2xl rounded-tl-sm px-4 py-2.5">
+            <div className="flex gap-1 items-center h-4">
+              {[0, 150, 300].map(d => (
+                <span key={d} className="h-2 w-2 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: `${d}ms`, animationDuration: "0.9s" }} />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       <div ref={chatEndRef} />
     </div>
   );
