@@ -40,8 +40,11 @@ export default function LiveLeadDetailPage() {
     loadMessages();
 
     // connect websocket to lead channel for real-time messages
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${window.location.host}/api/ws/live/lead:${id}`;
+    // Use REACT_APP_BACKEND_URL so we hit the backend host, not the frontend host.
+    const backendBase = process.env.REACT_APP_BACKEND_URL || window.location.origin;
+    const wsBase = backendBase.replace(/^http/i, "ws");
+    const url = `${wsBase}/api/ws/live/lead:${id}`;
+    let pollIntervalId = null;
     try {
       const ws = new WebSocket(url);
       wsRef.current = ws;
@@ -49,7 +52,10 @@ export default function LiveLeadDetailPage() {
         try {
           const data = JSON.parse(ev.data);
           if (data.type === 'new_message' && data.message) {
-            setMessages(m => [...m, data.message]);
+            setMessages(m => {
+              if (m.some(x => x.id === data.message.id)) return m;
+              return [...m, data.message];
+            });
           }
           if (data.type === 'agent_joined') {
             // refresh lead info
@@ -59,27 +65,43 @@ export default function LiveLeadDetailPage() {
           if (data.type === 'typing') {
             const status = data.payload?.status;
             if (status === 'start') {
-              setMessages(m => [...m, { id: `typing_${Date.now()}`, role: 'agent', text: '…', _typing: true }]);
+              setMessages(m => [...m.filter(x => !x._typing), { id: `typing_${Date.now()}`, role: 'user', text: '…', _typing: true }]);
             } else if (status === 'stop') {
               setMessages(m => m.filter(x => !x._typing));
             }
           }
         } catch (e) { console.error(e); }
       };
+      ws.onerror = (e) => { console.warn('WS error — falling back to polling', e); };
+      ws.onclose = () => { console.info('WS closed — relying on polling'); };
     } catch (e) {
-      console.error('ws connect failed', e);
+      console.error('ws connect failed — relying on polling', e);
     }
 
-    return () => { if (wsRef.current) try { wsRef.current.close(); } catch(e){} };
+    // Fallback: poll every 4 s so messages still flow if WS isn't routed.
+    pollIntervalId = setInterval(() => { loadMessages(); }, 4000);
+
+    return () => {
+      if (wsRef.current) try { wsRef.current.close(); } catch (e) {}
+      if (pollIntervalId) clearInterval(pollIntervalId);
+    };
   }, [id]);
 
   const sendMessage = async () => {
     if (!input.trim()) return;
+    const text = input;
+    setInput("");
+    // Optimistic UI — add agent message immediately
+    const tempId = `temp_${Date.now()}`;
+    setMessages(m => [...m, { id: tempId, role: 'agent', text, type: 'text', created_at: new Date().toISOString(), _pending: true }]);
     try {
-      await api.post(`/live-leads/${id}/messages`, { role: "agent", type: "text", text: input });
-      setInput("");
+      await api.post(`/live-leads/${id}/messages`, { role: "agent", type: "text", text });
+      // Refresh from server to get the canonical message id
+      loadMessages();
     } catch (e) {
       toast.error("Failed to send message");
+      setMessages(m => m.filter(x => x.id !== tempId));
+      setInput(text);
     }
   };
 

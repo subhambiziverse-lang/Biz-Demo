@@ -262,8 +262,10 @@ export default function Demo() {
   useEffect(() => {
     // connect websocket to listen for agent events and messages for this session
     if (!sessionId) return;
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${window.location.host}/api/ws/live/session:${sessionId}`;
+    // Use REACT_APP_BACKEND_URL so we hit the backend host, not the frontend host.
+    const backendBase = process.env.REACT_APP_BACKEND_URL || window.location.origin;
+    const wsBase = backendBase.replace(/^http/i, "ws");
+    const url = `${wsBase}/api/ws/live/session:${sessionId}`;
     try {
       const ws = new WebSocket(url);
       wsRef.current = ws;
@@ -278,7 +280,14 @@ export default function Demo() {
           }
           if (data.type === 'new_message' && data.message) {
             const m = data.message;
-            setChat(c => [...c, { role: m.role === 'user' ? 'user' : 'agent', text: m.text, created_at: m.created_at }]);
+            setChat(c => {
+              // Dedupe: if last message has same role & text within 5s, skip (own echo)
+              const last = c[c.length - 1];
+              if (last && last.role === (m.role === 'user' ? 'user' : 'agent') && last.text === m.text) {
+                return c;
+              }
+              return [...c, { role: m.role === 'user' ? 'user' : 'agent', text: m.text, created_at: m.created_at }];
+            });
           }
           if (data.type === 'typing' && data.from === 'agent') {
             setAgentTyping(true);
@@ -287,6 +296,7 @@ export default function Demo() {
         } catch (e) { console.error(e); }
       };
       ws.onclose = () => { setAgentLive(false); };
+      ws.onerror = (e) => { console.warn('public ws error', e); };
     } catch (e) {
       console.error('ws connect failed', e);
     }
@@ -608,12 +618,35 @@ export default function Demo() {
   };
 
   // ── Send chat message ──
+  // When agent joins, resolve the live_lead_id so we can mirror user messages to the agent
+  const [activeLeadId, setActiveLeadId] = useState(null);
+  useEffect(() => {
+    if (!agentLive || !sessionId) { return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get(`/live-leads/session/${sessionId}`);
+        if (!cancelled && r.data?.id) setActiveLeadId(r.data.id);
+      } catch (e) { /* lead may not exist yet — ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [agentLive, sessionId]);
+
   const sendChat = async () => {
     if (!chatInput.trim()) return;
     const q = chatInput.trim();
     setQuestionsAsked(prev => [...new Set([...prev, q])]);
     setChat(c => [...c, { role: "user", text: q }]);
     setChatInput("");
+
+    // If a human agent is live on this session, route the message to the agent (skip AI)
+    if (agentLive && activeLeadId) {
+      try {
+        await api.post(`/live-leads/${activeLeadId}/messages`, { role: "user", type: "text", text: q });
+      } catch (e) { console.error("Failed to send to agent", e); }
+      return;
+    }
+
     setChatLoading(true);
     if (!tryYourselfMode) doPause();
     voice.stop();
