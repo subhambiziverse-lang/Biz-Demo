@@ -239,6 +239,7 @@ export default function Demo() {
   const [chatLoading, setChatLoading] = useState(false);
   const [pendingMini, setPendingMini] = useState(null);
   const [agentTyping, setAgentTyping] = useState(false);
+  const [activeLeadId, setActiveLeadId] = useState(null);
 
   // Track questions for CRM
   const [questionsAsked, setQuestionsAsked] = useState([]);
@@ -631,7 +632,6 @@ export default function Demo() {
 
   // ── Send chat message ──
   // When agent joins, resolve the live_lead_id so we can mirror user messages to the agent
-  const [activeLeadId, setActiveLeadId] = useState(null);
   useEffect(() => {
     if (!agentLive || !sessionId) { return; }
     let cancelled = false;
