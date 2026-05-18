@@ -26,6 +26,9 @@ import AnalyticsPage from "./pages/admin/AnalyticsPage";
 import UnansweredPage from "./pages/admin/UnansweredPage";
 import SettingsPage from "./pages/admin/SettingsPage";
 import LanguagesPage from "./pages/admin/LanguagesPage";
+import LiveLeadsPage from "./pages/admin/LiveLeadsPage";
+import UsersPage from "./pages/admin/UsersPage";
+import LiveLeadDetailPage from "./pages/admin/LiveLeadDetailPage";
 
 function Router() {
   const location = useLocation();
@@ -55,6 +58,9 @@ function Router() {
         <Route path="analytics" element={<AnalyticsPage />} />
         <Route path="unanswered" element={<UnansweredPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="live-leads" element={<LiveLeadsPage />} />
+        <Route path="live-leads/:id" element={<LiveLeadDetailPage />} />
+        <Route path="users" element={<UsersPage />} />
       </Route>
     </Routes>
   );

@@ -31,6 +31,8 @@ export default function AdminLayout() {
     { to: "/admin/languages", icon: Globe, label: "Languages" },
     { to: "/admin/analytics", icon: BarChart3, label: "Analytics" },
     { to: "/admin/settings", icon: Cog, label: "Settings" },
+    { to: "/admin/live-leads", icon: HelpCircle, label: "Live Leads" },
+    { to: "/admin/users", icon: LayoutDashboard, label: "Users" },
   ];
 
   return (

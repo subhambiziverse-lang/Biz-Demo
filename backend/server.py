@@ -1,13 +1,16 @@
-"""Smart Guided Demo - Biziverse - Full Backend."""
+"""Smart Guided Demo - Biziverse - Full Backend (Optimized)."""
 from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Header, Cookie, Response, Request, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
+from fastapi import Depends
+from fastapi import WebSocket, WebSocketDisconnect
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os, logging, uuid, io, json, random, string, requests
+import os, logging, uuid, io, json, random, string, requests, time, csv, hashlib, hmac, binascii
+import io as _io
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timezone, timedelta
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 import re as _re
@@ -28,6 +31,200 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Biziverse Smart Guided Demo")
 api = APIRouter(prefix="/api")
+
+# ========== In-Memory Caches ==========
+# Avoids hitting MongoDB on every single chat message
+_kb_cache: Optional[List[Dict]] = None
+_kb_cache_ts: float = 0
+KB_CACHE_TTL = 120  # seconds — refresh every 2 min
+
+_module_labels_cache: Optional[Dict] = None
+_module_labels_ts: float = 0
+LABELS_CACHE_TTL = 300  # 5 minutes
+
+async def get_kb_entries_cached() -> List[Dict]:
+    global _kb_cache, _kb_cache_ts
+    now = time.monotonic()
+    if _kb_cache is not None and (now - _kb_cache_ts) < KB_CACHE_TTL:
+        return _kb_cache
+    entries = await db.kb_entries.find({"active": True}, {"_id": 0}).to_list(500)
+    _kb_cache = entries
+    _kb_cache_ts = now
+    return entries
+
+def invalidate_kb_cache():
+    global _kb_cache
+    _kb_cache = None
+
+
+# ── Simple WebSocket manager for live lead channels ──
+class WSManager:
+    def __init__(self):
+        self._conns: Dict[str, List[WebSocket]] = {}
+
+    async def connect(self, channel: str, websocket: WebSocket):
+        await websocket.accept()
+        self._conns.setdefault(channel, []).append(websocket)
+
+    def disconnect(self, channel: str, websocket: WebSocket):
+        conns = self._conns.get(channel) or []
+        if websocket in conns:
+            conns.remove(websocket)
+        if not conns and channel in self._conns:
+            del self._conns[channel]
+
+    async def broadcast(self, channel: str, payload: Dict[str, Any]):
+        conns = list(self._conns.get(channel, []))
+        if not conns:
+            return
+        text = json.dumps(payload)
+        for ws in conns:
+            try:
+                await ws.send_text(text)
+            except Exception:
+                logger.exception("WebSocket send failed")
+
+
+ws_manager = WSManager()
+
+DEFAULT_LLM_MODELS = {
+    "openai": [
+        "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-5.2", "gpt-5.1", "gpt-4.1-advanced"
+    ],
+    "anthropic": [
+        "claude-3.5", "claude-3.5-100k", "claude-4", "claude-instant"
+    ]
+}
+
+DEFAULT_AI_SETTINGS = {
+    "enabled": True,
+    "name": "Biziverse AI",
+    "avatar_url": "https://biziverse.com/WebExt/img/logo2.jpg",
+    "primary_color": "#f97316",
+    "secondary_color": "#0f172a",
+    "background_color": "#ffffff",
+    "greeting": {
+        "en": "Hi! I can answer questions about Biziverse. What would you like to know?",
+        "hi": "नमस्ते! मैं Biziverse के बारे में सवालों के जवाब दे सकता हूँ। आप क्या जानना चाहेंगे?",
+        "gu": "નમસ્તે! હું Biziverse વિશે પ્રશ્નોના જવાબ આપી શકું છું.",
+        "mr": "नमस्कार! मी Biziverse विषयी प्रश्नांची उत्तरे देऊ शकतो."
+    },
+    "executive_response": {
+        "en": "Sure! Our team will be happy to connect with you. Please use the button below to talk with an executive.",
+        "hi": "बिल्कुल! हमारी टीम आपसे बात करने में खुश होगी। नीचे दिए बटन से executive से बात करें।",
+        "gu": "ચોક્કસ! અમારી ટીમ તમારા સાથે વાત કરવા માટે ખુશ રહેશે. નીચે બટન પર ક્લિક કરો.",
+        "mr": "नक्कीच! आमची टीम तुमच्याशी बोलण्यास तयार आहे. खालील बटणाचा वापर करा."
+    },
+    "pricing_response": {
+        "en": "For pricing details and the best plan for your business, our team would love to walk you through it personally.",
+        "hi": "आपके व्यापार के लिए सही plan और pricing जानने के लिए हमारी team से बात करें।",
+        "gu": "તમારા વ્યવસાય માટે યોગ્ય પ્લાન અને પ્રાઇસિંગ જાણવા માટે અમારી ટીમ સાથે વાત કરો.",
+        "mr": "तुमच्या व्यवसायासाठी योग्य योजना आणि किंमत जाणून घेण्यासाठी आमच्या टीमशी बोला."
+    },
+    "fallback_response": {
+        "en": "I don't have an answer for that yet. Would you like to talk with an executive?",
+        "hi": "मेरे पास इसका जवाब अभी नहीं है। क्या आप किसी executive से बात करना चाहेंगे?",
+        "gu": "મારે પાસે આ જવાબ હજુ ન હતું. શું તમે executive સાથે વાત કરવા માંગો છો?",
+        "mr": "माझ्याकडे या प्रश्नाचे उत्तर अद्याप नाही. कार्यकारीशी बोलू इच्छिता?"
+    },
+    "show_exec_cta_on_direct_intent": True,
+    "show_exec_cta_on_no_answer": True,
+    "show_exec_cta_on_ambiguous": False,
+    "llm_model": {"provider": "openai", "model": "gpt-4o-mini"},
+    "api_key": ""
+}
+
+DEFAULT_SETTINGS = {
+    "show_executive_cta": True,
+    "executive_phone": "",
+    "ai_settings": DEFAULT_AI_SETTINGS
+}
+
+def merge_ai_settings(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    merged = {**DEFAULT_AI_SETTINGS}
+    if not isinstance(raw, dict):
+        return merged
+    for key, value in raw.items():
+        if key in {"greeting", "executive_response", "pricing_response", "fallback_response"}:
+            merged[key] = {**DEFAULT_AI_SETTINGS[key], **(value or {})}
+        elif key == "llm_model" and isinstance(value, dict):
+            merged[key] = {**DEFAULT_AI_SETTINGS["llm_model"], **value}
+        else:
+            merged[key] = value
+    return merged
+
+async def get_main_settings() -> Dict[str, Any]:
+    doc = await db.settings.find_one({"_id": "main"}, {"_id": 0}) or {}
+    ai_settings = merge_ai_settings(doc.get("ai_settings", {}))
+    result = {
+        "show_executive_cta": doc.get("show_executive_cta", DEFAULT_SETTINGS["show_executive_cta"]),
+        "executive_phone": doc.get("executive_phone", DEFAULT_SETTINGS["executive_phone"]),
+        "ai_settings": ai_settings
+    }
+    for k, v in doc.items():
+        if k not in result:
+            result[k] = v
+    return result
+
+# ========== Auth Helpers ==========
+PASSWORD_ITERATIONS = 120000
+
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
+    return f"{binascii.hexlify(salt).decode()}${binascii.hexlify(dk).decode()}"
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        salt_hex, hash_hex = stored_hash.split("$")
+        salt = binascii.unhexlify(salt_hex)
+        expected = binascii.unhexlify(hash_hex)
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+class CallbackRequestIn(BaseModel):
+    phone: str
+    callback_time: str                    # ISO datetime string
+    session_id: Optional[str] = None
+    business_type: Optional[str] = None
+    product_category: Optional[str] = None
+    modules_watched: Optional[List[str]] = []
+    questions_asked: Optional[List[str]] = []
+    language: Optional[str] = "en"
+    human_now: Optional[bool] = False
+    voice_requested: Optional[bool] = False
+    request_note: Optional[str] = None
+
+class LiveLeadMessageIn(BaseModel):
+    role: str
+    type: str = "text"
+    text: Optional[str] = None
+    audio_data: Optional[str] = None
+
+class LiveLeadUpdateIn(BaseModel):
+    assigned_to: Optional[str] = None
+    status: Optional[str] = None
+    industry: Optional[str] = None
+    sector: Optional[str] = None
+
+class AuthLoginIn(BaseModel):
+    user_id: str
+    password: str
+
+class AdminUserIn(BaseModel):
+    user_id: str
+    email: Optional[str] = None
+    name: Optional[str] = None
+    role: Optional[str] = "agent"
+    password: Optional[str] = None
+
+class AdminUserUpdateIn(BaseModel):
+    email: Optional[str] = None
+    name: Optional[str] = None
+    role: Optional[str] = None
+    password: Optional[str] = None
 
 # ========== Object Storage ==========
 _storage_key = None
@@ -86,8 +283,6 @@ async def get_current_admin(session_token: Optional[str] = Cookie(None),
         raise HTTPException(401, "User not found")
     return user
 
-from fastapi import Depends
-
 async def admin_dep(session_token: Optional[str] = Cookie(None),
                     authorization: Optional[str] = Header(None)):
     return await get_current_admin(session_token=session_token, authorization=authorization)
@@ -132,10 +327,10 @@ class PaymentIn(BaseModel):
 class VideoMarker(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: float
-    pause_duration: float = 0  # 0 = wait for user
-    highlight: Optional[Dict[str, Any]] = None  # {x,y,w,h,shape}
-    cursor: Optional[Dict[str, float]] = None  # {x,y}
-    narration: Dict[str, str] = {}  # lang -> text
+    pause_duration: float = 0
+    highlight: Optional[Dict[str, Any]] = None
+    cursor: Optional[Dict[str, float]] = None
+    narration: Dict[str, str] = {}
 
 class ModuleVideoIn(BaseModel):
     model_config = {"extra": "allow"}
@@ -145,27 +340,27 @@ class ModuleVideoIn(BaseModel):
     storage_path: str = ""
     duration: float = 0
     markers: List[Dict[str, Any]] = []
-    chapters: List[Dict[str, Any]] = []   # [{name, start, end}]
+    chapters: List[Dict[str, Any]] = []
     published: bool = False
     biziverse_url: Optional[str] = None
     show_try_yourself: bool = True
-    target_languages: List[str] = []        # empty = all
-    target_business_types: List[str] = []   # empty = all
-    target_product_categories: List[str] = []  # empty = all
-    primary_language: Optional[str] = None  # e.g., "hi" — used to enable YT auto-translate captions when user picks different lang
+    target_languages: List[str] = []
+    target_business_types: List[str] = []
+    target_product_categories: List[str] = []
+    primary_language: Optional[str] = None
 
 class FlowIn(BaseModel):
     business_type: str
     product_category: str
     modules: List[str]
     name: str
-    video_sequence: List[str] = []  # module_video ids in order
-    transition_text: Dict[str, str] = {}  # lang -> "Now showing"
-    status: str = "draft"  # draft | active
+    video_sequence: List[str] = []
+    transition_text: Dict[str, str] = {}
+    status: str = "draft"
 
 class KBEntryIn(BaseModel):
     question: str
-    answers: Dict[str, str] = {}  # lang -> answer
+    answers: Dict[str, str] = {}
     tags: List[str] = []
     video_url: Optional[str] = None
     video_start: Optional[float] = None
@@ -173,9 +368,9 @@ class KBEntryIn(BaseModel):
     active: bool = True
 
 class QuizOptionsIn(BaseModel):
-    business_types: List[Dict[str, Any]]  # [{key, label:{lang:txt}}]
-    product_categories: Dict[str, List[Dict[str, Any]]]  # {bt: [{key,label}]}
-    modules: Dict[str, List[str]]  # {"bt|pc": [module_keys]}
+    business_types: List[Dict[str, Any]]
+    product_categories: Dict[str, List[Dict[str, Any]]]
+    modules: Dict[str, List[str]]
 
 # ========== Auth Routes ==========
 @api.post("/auth/google-callback")
@@ -201,7 +396,7 @@ async def google_callback(payload: GoogleAuthIn, response: Response):
             "email": email,
             "name": data.get("name", ""),
             "picture": data.get("picture", ""),
-            "role": "editor",  # default editor
+            "role": "editor",
             "created_at": datetime.now(timezone.utc).isoformat()
         })
 
@@ -254,47 +449,47 @@ DEFAULT_QUIZ = {
             {"key": "fmcg", "label": {"en": "FMCG", "hi": "FMCG", "gu": "FMCG", "mr": "FMCG"}},
             {"key": "pharma", "label": {"en": "Pharma & Healthcare", "hi": "दवाइयाँ / फार्मा", "gu": "ફાર્મા / દવા", "mr": "फार्मा / औषध"}},
             {"key": "auto", "label": {"en": "Auto Parts & Spares", "hi": "ऑटो पार्ट्स", "gu": "ઓટો સ્પેર પાર્ટ્સ", "mr": "ऑटो स्पेअर्स"}},
-            {"key": "electronics_d", "label": {"en": "Consumer Electronics", "hi": "इलेक्ट्रॉनिक्स", "gu": "ઇલેક્ટ્રોનિક્સ", "mr": "इलेक्ट्रॉनिक्स"}},
+            {"key": "electronics_d", "label": {"en": "Consumer Electronics", "hi": "इलेक्ट्रॉनिक्स", "gu": "ઇલેક્ટ્રોનिक्स", "mr": "इलेक्ट्रॉनिक्स"}},
             {"key": "agri_inputs", "label": {"en": "Agri Inputs (Seed, Fertiliser)", "hi": "कृषि सामग्री (बीज, खाद)", "gu": "કૃષિ સામગ્રી (બીજ, ખાતર)", "mr": "कृषी निविष्ठा (बी-बियाणे, खते)"}},
-            {"key": "other_d", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+            {"key": "other_d", "label": {"en": "Other", "hi": "अन्य", "gu": "અन्य", "mr": "इतर"}},
         ],
         "retail": [
             {"key": "kirana", "label": {"en": "Kirana / Grocery", "hi": "किराना / जनरल स्टोर", "gu": "કિરાણા / જનરલ સ્ટોર", "mr": "किराणा / जनरल स्टोअर"}},
             {"key": "fashion", "label": {"en": "Fashion & Apparel", "hi": "फैशन / कपड़े", "gu": "ફેશન / કપડાં", "mr": "फॅशन / कपडे"}},
-            {"key": "mobile", "label": {"en": "Mobile & Electronics", "hi": "मोबाइल / इलेक्ट्रॉनिक्स", "gu": "મોબાઈલ / ઇલેક્ટ્રોનિક્સ", "mr": "मोबाईल / इलेक्ट्रॉनिक्स"}},
+            {"key": "mobile", "label": {"en": "Mobile & Electronics", "hi": "मोबाइल / इलेक्ट्रॉनिक्स", "gu": "મોબાઈલ / ઇલેક્ટ્રોનिक्स", "mr": "मोबाईल / इलेक्ट्रॉनिक्स"}},
             {"key": "medical", "label": {"en": "Medical Store / Pharmacy", "hi": "मेडिकल स्टोर", "gu": "મેડિકલ સ્ટોર", "mr": "मेडिकल स्टोअर"}},
             {"key": "jewellery", "label": {"en": "Jewellery", "hi": "जेवर / आभूषण", "gu": "ઝવેરાત", "mr": "दागिने"}},
-            {"key": "other_r", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+            {"key": "other_r", "label": {"en": "Other", "hi": "अन्य", "gu": "અन्य", "mr": "इतर"}},
         ],
         "manufacturer": [
-            {"key": "engineering", "label": {"en": "Engineering / Fabrication", "hi": "इंजीनियरिंग / फैब्रिकेशन", "gu": "એન્જિનિયરિંગ / ફેબ્રિકેશન", "mr": "इंजिनीअरिंग / फॅब्रिकेशन"}},
-            {"key": "food", "label": {"en": "Food Processing", "hi": "खाद्य प्रसंस्करण", "gu": "ફૂડ પ્રોસેસિંગ", "mr": "अन्न प्रक्रिया"}},
-            {"key": "chemicals", "label": {"en": "Chemicals", "hi": "रसायन", "gu": "રસાયણ", "mr": "रसायने"}},
-            {"key": "pharma_m", "label": {"en": "Pharma Manufacturing", "hi": "फार्मा निर्माण", "gu": "ફાર્મા ઉત્પાદન", "mr": "फार्मा उत्पादन"}},
-            {"key": "textile_m", "label": {"en": "Textile / Garment", "hi": "टेक्सटाइल / गारमेंट", "gu": "ટેક્સટાઇલ / ગારમેન્ટ", "mr": "टेक्सटाइल / गारमेंट"}},
-            {"key": "plastic", "label": {"en": "Plastic / Packaging", "hi": "प्लास्टिक / पैकेजिंग", "gu": "પ્લાસ્ટિક / પેકેજિંગ", "mr": "प्लास्टिक / पॅकेजिंग"}},
-            {"key": "other_m", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+            {"key": "engineering", "label": {"en": "Engineering / Fabrication", "hi": "इंजीनियरिंग / फैब्रिकेशन", "gu": "એન્જિનિયरिंग / ફेบ્રिकेশन", "mr": "इंजिनीअरिंग / फॅब्रिकेशन"}},
+            {"key": "food", "label": {"en": "Food Processing", "hi": "खाद्य प्रसंस्करण", "gu": "ફૂડ પ્રોसेसिंग", "mr": "अन्न प्रक्रिया"}},
+            {"key": "chemicals", "label": {"en": "Chemicals", "hi": "रसायन", "gu": "રसायण", "mr": "रसायने"}},
+            {"key": "pharma_m", "label": {"en": "Pharma Manufacturing", "hi": "फार्मा निर्माण", "gu": "ફાર્મા ઉत्पादन", "mr": "फार्मा उत्पादन"}},
+            {"key": "textile_m", "label": {"en": "Textile / Garment", "hi": "टेक्सटाइल / गारमेंट", "gu": "ટेक्सटाइल / ગારमेंट", "mr": "टेक्सटाइल / गारमेंट"}},
+            {"key": "plastic", "label": {"en": "Plastic / Packaging", "hi": "प्लास्टिक / पैकेजिंग", "gu": "પ્લास्टिक / પेकेजिंग", "mr": "प्लास्टिक / पॅकेजिंग"}},
+            {"key": "other_m", "label": {"en": "Other", "hi": "अन्य", "gu": "અन्य", "mr": "इतर"}},
         ],
         "service": [
-            {"key": "it", "label": {"en": "IT Services / Software", "hi": "IT सेवा / सॉफ्टवेयर", "gu": "IT સેવા / સોફ્ટવેર", "mr": "IT सेवा / सॉफ्टवेअर"}},
-            {"key": "consulting", "label": {"en": "Consulting / Professional", "hi": "कंसल्टिंग / प्रोफेशनल", "gu": "કન્સલ્ટિંગ / પ્રોફેશનલ", "mr": "कन्सल्टिंग / प्रोफेशनल"}},
-            {"key": "logistics", "label": {"en": "Logistics / Transport", "hi": "लॉजिस्टिक्स / ट्रांसपोर्ट", "gu": "લોજિસ્ટિક્સ / ટ્રાન્સપોર્ટ", "mr": "लॉजिस्टिक्स / वाहतूक"}},
-            {"key": "education", "label": {"en": "Education / Training", "hi": "शिक्षा / ट्रेनिंग", "gu": "શિક્ષણ / તાલીમ", "mr": "शिक्षण / प्रशिक्षण"}},
-            {"key": "hospitality", "label": {"en": "Hospitality / Restaurant", "hi": "हॉस्पिटैलिटी / रेस्तरां", "gu": "હોસ્પિટાલિટી / રેસ્ટોરન્ટ", "mr": "हॉस्पिटॅलिटी / रेस्टॉरंट"}},
-            {"key": "other_s", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+            {"key": "it", "label": {"en": "IT Services / Software", "hi": "IT सेवा / सॉफ्टवेयर", "gu": "IT સेवा / સॉफ्टवेयर", "mr": "IT सेवा / सॉफ्टवेअर"}},
+            {"key": "consulting", "label": {"en": "Consulting / Professional", "hi": "कंसल्टिंग / प्रोफेशनल", "gu": "કन्सल्टिंग / પ્રोफेशनल", "mr": "कन्सल्टिंग / प्रोफेशनल"}},
+            {"key": "logistics", "label": {"en": "Logistics / Transport", "hi": "लॉजिस्टिक्स / ट्रांसपोर्ट", "gu": "લोजिस्टिक्स / ટ્રान्सपोर्ट", "mr": "लॉजिस्टिक्स / वाहतूक"}},
+            {"key": "education", "label": {"en": "Education / Training", "hi": "शिक्षा / ट्रेनिंग", "gu": "શिक्षण / તालीम", "mr": "शिक्षण / प्रशिक्षण"}},
+            {"key": "hospitality", "label": {"en": "Hospitality / Restaurant", "hi": "हॉस्पिटैलिटी / रेस्तरां", "gu": "હोस्पिटालिटी / રेस्टोरन्ट", "mr": "हॉस्पिटॅलिटी / रेस्टॉरंट"}},
+            {"key": "other_s", "label": {"en": "Other", "hi": "अन्य", "gu": "અन्य", "mr": "इतर"}},
         ],
         "ecom": [
-            {"key": "fashion_e", "label": {"en": "Fashion & Apparel", "hi": "फैशन / कपड़े", "gu": "ફેશન / કપડાં", "mr": "फॅशन / कपडे"}},
-            {"key": "electronics_e", "label": {"en": "Electronics & Gadgets", "hi": "इलेक्ट्रॉनिक्स / गैजेट्स", "gu": "ઇલેક્ટ્રોનિક્સ / ગેજેટ્સ", "mr": "इलेक्ट्रॉनिक्स / गॅजेट्स"}},
-            {"key": "home_e", "label": {"en": "Home & Kitchen", "hi": "होम / किचन", "gu": "ઘર / કિચન", "mr": "घर / स्वयंपाकघर"}},
-            {"key": "beauty_e", "label": {"en": "Beauty & Personal Care", "hi": "ब्यूटी / पर्सनल केयर", "gu": "બ્યુટી / પર્સનલ કેર", "mr": "ब्युटी / पर्सनल केअर"}},
-            {"key": "other_e", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+            {"key": "fashion_e", "label": {"en": "Fashion & Apparel", "hi": "फैशन / कपड़े", "gu": "ફेशन / કपडां", "mr": "फॅशन / कपडे"}},
+            {"key": "electronics_e", "label": {"en": "Electronics & Gadgets", "hi": "इलेक्ट्रॉनिक्स / गैजेट्स", "gu": "ઇलेक्ट्रोनिक्स / ગेजेट्स", "mr": "इलेक्ट्रॉनिक्स / गॅजेट्स"}},
+            {"key": "home_e", "label": {"en": "Home & Kitchen", "hi": "होम / किचन", "gu": "ઘर / કिचन", "mr": "घर / स्वयंपाकघर"}},
+            {"key": "beauty_e", "label": {"en": "Beauty & Personal Care", "hi": "ब्यूटी / पर्सनल केयर", "gu": "બ્યुटी / પर्सनल केर", "mr": "ब्युटी / पर्सनल केअर"}},
+            {"key": "other_e", "label": {"en": "Other", "hi": "अन्य", "gu": "અन्य", "mr": "इतर"}},
         ],
         "contractor": [
-            {"key": "construction", "label": {"en": "Construction / Civil", "hi": "निर्माण / सिविल", "gu": "બાંધકામ / સિવિલ", "mr": "बांधकाम / सिव्हिल"}},
-            {"key": "interior", "label": {"en": "Interior / Fit-out", "hi": "इंटीरियर / फिट-आउट", "gu": "ઈન્ટિરિયર / ફિટ-આઉટ", "mr": "इंटिरियर / फिट-आऊट"}},
-            {"key": "electrical_c", "label": {"en": "Electrical / Plumbing", "hi": "इलेक्ट्रिकल / प्लंबिंग", "gu": "ઇલેક્ટ્રિકલ / પ્લમ્બિંગ", "mr": "इलेक्ट्रिकल / प्लंबिंग"}},
-            {"key": "other_c", "label": {"en": "Other", "hi": "अन्य", "gu": "અન્ય", "mr": "इतर"}},
+            {"key": "construction", "label": {"en": "Construction / Civil", "hi": "निर्माण / सिविल", "gu": "બांधकाम / સिविल", "mr": "बांधकाम / सिव्हिल"}},
+            {"key": "interior", "label": {"en": "Interior / Fit-out", "hi": "इंटीरियर / फिट-आउट", "gu": "ઈन्टिरियर / ફिट-आउट", "mr": "इंटिरियर / फिट-आऊट"}},
+            {"key": "electrical_c", "label": {"en": "Electrical / Plumbing", "hi": "इलेक्ट्रिकल / प्लंबिंग", "gu": "ઇलेक्ट्रिकल / પ्लम्बिंग", "mr": "इलेक्ट्रिकल / प्लंबिंग"}},
+            {"key": "other_c", "label": {"en": "Other", "hi": "अन्य", "gu": "અन्य", "mr": "इतर"}},
         ],
     },
     "modules": {
@@ -306,26 +501,25 @@ DEFAULT_QUIZ = {
 
 DEFAULT_MODULE_LABELS = {
     "crm": {"en": "Leads & CRM", "hi": "लीड्स / CRM", "gu": "લીડ્સ / CRM", "mr": "लीड्स / CRM"},
-    "quotes": {"en": "Quotes & Proforma Invoice", "hi": "कोटेशन / प्रोफार्मा", "gu": "ક્વોટેશન / પ્રોફોર્મા", "mr": "कोटेशन / प्रोफॉर्मा"},
-    "sales_orders": {"en": "Sales Orders", "hi": "बिक्री ऑर्डर", "gu": "વેચાણ ઓર્ડર", "mr": "विक्री ऑर्डर"},
-    "sales_invoices": {"en": "Sales Invoice (GST, e-Invoice, e-Way Bill)", "hi": "बिक्री चालान (GST, e-Invoice, e-Way Bill)", "gu": "વેચાણ ઇન્વોઇસ (GST, e-Invoice)", "mr": "विक्री इन्व्हॉइस (GST, e-Invoice)"},
-    "recovery": {"en": "Payment Recovery & Reminders", "hi": "बकाया वसूली / रिमाइंडर", "gu": "પેમેન્ટ રિકવરી / રિમાઇન્ડર", "mr": "वसुली / रिमाइंडर"},
-    "contracts": {"en": "Contracts (AMC & Renewals)", "hi": "कॉन्ट्रैक्ट (AMC / रिन्यूअल)", "gu": "કોન્ટ્રાક્ટ (AMC / રિન્યુઅલ)", "mr": "कॉन्ट्रॅक्ट (AMC / नूतनीकरण)"},
-    "tickets": {"en": "Support Tickets", "hi": "सपोर्ट टिकट", "gu": "સપોર્ટ ટિકિટ", "mr": "सपोर्ट तिकीट"},
-    "customers": {"en": "Customer Master", "hi": "ग्राहक मास्टर", "gu": "ગ્રાહક માસ્ટર", "mr": "ग्राहक मास्टर"},
-    "accounts": {"en": "Accounts & Bookkeeping", "hi": "अकाउंट / बहीखाता", "gu": "એકાઉન્ટ / બુકકીપિંગ", "mr": "अकाउंट / वहीखाते"},
-    "purchases": {"en": "Purchases (Invoice, GRN, GSTR3)", "hi": "खरीद (बिल, GRN, GSTR3)", "gu": "ખરીદી (બિલ, GRN, GSTR3)", "mr": "खरेदी (बिल, GRN, GSTR3)"},
-    "purchase_orders": {"en": "Purchase Orders", "hi": "खरीद ऑर्डर", "gu": "ખરીદ ઓર્ડર", "mr": "खरेदी ऑर्डर"},
-    "inventory": {"en": "Inventory (Batch-wise)", "hi": "इन्वेंटरी (बैच वार)", "gu": "ઈન્વેન્ટરી (બેચ વાર)", "mr": "इन्व्हेंटरी (बॅच-वार)"},
-    "manufacturing": {"en": "Manufacturing (BOM, Job, Backflush)", "hi": "मैन्युफैक्चरिंग (BOM, जॉब)", "gu": "મેન્યુફેક્ચરિંગ (BOM, જોબ)", "mr": "मॅन्युफॅक्चरिंग (BOM, जॉब)"},
-    "projects": {"en": "Projects", "hi": "प्रोजेक्ट", "gu": "પ્રોજેક્ટ", "mr": "प्रकल्प"},
-    "tasks": {"en": "Tasks & Todo", "hi": "टास्क / टू-डू", "gu": "ટાસ્ક / ટુ-ડુ", "mr": "टास्क / टू-डू"},
-    "suppliers": {"en": "Suppliers Master", "hi": "सप्लायर मास्टर", "gu": "સપ્લાયર માસ્ટર", "mr": "सप्लायर मास्टर"},
-    "store": {"en": "Your Online Store", "hi": "ऑनलाइन स्टोर", "gu": "ઓનલાઇન સ્ટોર", "mr": "ऑनलाइन स्टोअर"},
-    "reports": {"en": "Reports & Analytics", "hi": "रिपोर्ट / एनालिटिक्स", "gu": "રિપોર્ટ / એનાલિટિક્સ", "mr": "रिपोर्ट / अॅनालिटिक्स"},
+    "quotes": {"en": "Quotes & Proforma Invoice", "hi": "कोटेशन / प्रोफार्मा", "gu": "ક્વોટेशन / પ્રोफोर्मा", "mr": "कोटेशन / प्रोफॉर्मा"},
+    "sales_orders": {"en": "Sales Orders", "hi": "बिक्री ऑर्डर", "gu": "વेचाण ऑर्डर", "mr": "विक्री ऑर्डर"},
+    "sales_invoices": {"en": "Sales Invoice (GST, e-Invoice, e-Way Bill)", "hi": "बिक्री चालान (GST, e-Invoice, e-Way Bill)", "gu": "વेचाण इन्वोइस (GST, e-Invoice)", "mr": "विक्री इन्व्हॉइस (GST, e-Invoice)"},
+    "recovery": {"en": "Payment Recovery & Reminders", "hi": "बकाया वसूली / रिमाइंडर", "gu": "પेमेंट रिकवरी / रिमाइंडर", "mr": "वसुली / रिमाइंडर"},
+    "contracts": {"en": "Contracts (AMC & Renewals)", "hi": "कॉन्ट्रैक्ट (AMC / रिन्यूअल)", "gu": "કोन्ट्राक्ट (AMC / रिन्युअल)", "mr": "कॉन्ट्रॅक्ट (AMC / नूतनीकरण)"},
+    "tickets": {"en": "Support Tickets", "hi": "सपोर्ट टिकट", "gu": "સपोर्ट टिकिट", "mr": "सपोर्ट तिकीट"},
+    "customers": {"en": "Customer Master", "hi": "ग्राहक मास्टर", "gu": "ગ्राहक मास्टर", "mr": "ग्राहक मास्टर"},
+    "accounts": {"en": "Accounts & Bookkeeping", "hi": "अकाउंट / बहीखाता", "gu": "એकाउंट / बुककीपिंग", "mr": "अकाउंट / वहीखाते"},
+    "purchases": {"en": "Purchases (Invoice, GRN, GSTR3)", "hi": "खरीद (बिल, GRN, GSTR3)", "gu": "ખरीदी (बिल, GRN, GSTR3)", "mr": "खरेदी (बिल, GRN, GSTR3)"},
+    "purchase_orders": {"en": "Purchase Orders", "hi": "खरीद ऑर्डर", "gu": "ખरीद ऑर्डर", "mr": "खरेदी ऑर्डर"},
+    "inventory": {"en": "Inventory (Batch-wise)", "hi": "इन्वेंटरी (बैच वार)", "gu": "ઈन्वेंटरी (बेच वार)", "mr": "इन्व्हेंटरी (बॅच-वार)"},
+    "manufacturing": {"en": "Manufacturing (BOM, Job, Backflush)", "hi": "मैन्युफैक्चरिंग (BOM, जॉब)", "gu": "મेन्युफेक्चरिंग (BOM, जोब)", "mr": "मॅन्युफॅक्चरिंग (BOM, जॉब)"},
+    "projects": {"en": "Projects", "hi": "प्रोजेक्ट", "gu": "પ્રोजेक्ट", "mr": "प्रकल्प"},
+    "tasks": {"en": "Tasks & Todo", "hi": "टास्क / टू-डू", "gu": "ટास्क / टु-डु", "mr": "टास्क / टू-डू"},
+    "suppliers": {"en": "Suppliers Master", "hi": "सप्लायर मास्टर", "gu": "સप्लायर मास्टर", "mr": "सप्लायर मास्टर"},
+    "store": {"en": "Your Online Store", "hi": "ऑनलाइन स्टोर", "gu": "ઓनलाइन स्टोर", "mr": "ऑनलाइन स्टोअर"},
+    "reports": {"en": "Reports & Analytics", "hi": "रिपोर्ट / एनालिटिक्स", "gu": "રिपोर्ट / एनालिटिक्स", "mr": "रिपोर्ट / अॅनालिटिक्स"},
 }
 
-# Languages — Indian + International. Admin can add more via /admin/languages.
 DEFAULT_LANGUAGES = [
     {"code": "en", "label": "English", "native": "English"},
     {"code": "hi", "label": "Hindi", "native": "हिन्दी"},
@@ -334,17 +528,22 @@ DEFAULT_LANGUAGES = [
 ]
 
 async def get_module_labels() -> Dict[str, Dict[str, str]]:
-    """Returns module_key -> {lang: label}. Merges DB overrides on top of defaults."""
+    global _module_labels_cache, _module_labels_ts
+    now = time.monotonic()
+    if _module_labels_cache is not None and (now - _module_labels_ts) < LABELS_CACHE_TTL:
+        return _module_labels_cache
     doc = await db.module_labels.find_one({"_id": "main"})
     if doc and isinstance(doc.get("labels"), dict):
         merged = {**DEFAULT_MODULE_LABELS}
         for k, v in doc["labels"].items():
             if isinstance(v, dict):
                 merged[k] = {**DEFAULT_MODULE_LABELS.get(k, {}), **v}
-        return merged
-    return DEFAULT_MODULE_LABELS
+        _module_labels_cache = merged
+    else:
+        _module_labels_cache = DEFAULT_MODULE_LABELS
+    _module_labels_ts = now
+    return _module_labels_cache
 
-# Backwards-compatible reference (used in narration seed strings)
 MODULE_LABELS = DEFAULT_MODULE_LABELS
 
 WORKFLOW_ORDER = ["crm", "quotes", "sales_orders", "sales_invoices", "recovery", "contracts",
@@ -358,14 +557,12 @@ async def quiz_options(business_type: Optional[str] = None, product_category: Op
         return {"business_types": cfg["business_types"]}
     if business_type and not product_category:
         return {"product_categories": cfg["product_categories"].get(business_type, [])}
-    # Modules: filtered by which have published videos
     pub_videos = await db.module_videos.find({"published": True}, {"_id": 0, "module_key": 1}).to_list(1000)
     available_modules = list({v["module_key"] for v in pub_videos})
-    # honor admin-configured per-segment
     cfg_mods = cfg.get("modules", {}).get(f"{business_type}|{product_category}") or cfg.get("modules", {}).get("_default", [])
     final = [m for m in cfg_mods if m in available_modules]
     if not final:
-        final = available_modules  # fallback show all available
+        final = available_modules
     labels = await get_module_labels()
     out = [{"key": m, "label": labels.get(m, {"en": m})} for m in final]
     return {"modules": out}
@@ -373,7 +570,6 @@ async def quiz_options(business_type: Optional[str] = None, product_category: Op
 @api.post("/quiz/submit")
 async def quiz_submit(payload: QuizSubmit):
     sid = payload.session_id or f"sess_{uuid.uuid4().hex[:12]}"
-    # Resolution: try combination flow first
     combo = await db.demo_flows.find_one({
         "business_type": payload.business_type,
         "product_category": payload.product_category,
@@ -391,7 +587,6 @@ async def quiz_submit(payload: QuizSubmit):
             if v:
                 videos.append(v)
     else:
-        # Fallback to individual videos in workflow order
         ordered = sorted(payload.modules, key=lambda m: WORKFLOW_ORDER.index(m) if m in WORKFLOW_ORDER else 999)
         for m in ordered:
             v = await db.module_videos.find_one({"module_key": m, "published": True}, {"_id": 0})
@@ -432,19 +627,16 @@ async def session_start():
     })
     return {"session_id": sid}
 
-# ========== AI Chat (GPT-5.2 grounded in KB) ==========
+# ========== AI Chat — Cost-Optimized + Smart Clarification ==========
 LANG_NAMES = {"en": "English", "hi": "Hindi", "gu": "Gujarati", "mr": "Marathi"}
 
 def _parse_llm_json(raw: str) -> Dict[str, Any]:
-    """Best-effort JSON extraction from an LLM response."""
     if not raw:
         return {}
     raw = raw.strip()
-    # Strip code fences if present
     if raw.startswith("```"):
         raw = _re.sub(r"^```(?:json)?\s*", "", raw)
         raw = _re.sub(r"\s*```$", "", raw)
-    # Find first {...} block
     m = _re.search(r"\{[\s\S]*\}", raw)
     if not m:
         return {}
@@ -453,95 +645,185 @@ def _parse_llm_json(raw: str) -> Dict[str, Any]:
     except Exception:
         return {}
 
-async def llm_match_kb(question: str, kb_entries: List[Dict[str, Any]], lang: str) -> Dict[str, Any]:
-    """Use GPT-5.2 to pick the best KB match.
+# ------------------------------------------------------------------
+# Keyword pre-filter: narrows 500 KB entries → top N before LLM call
+# Saves ~85% of input tokens on every chat message
+# ------------------------------------------------------------------
+def _keyword_prefilter(question: str, kb_entries: List[Dict], top_n: int = 15) -> List[Dict]:
+    q_tokens = set(w.lower() for w in _re.split(r'\W+', question) if len(w) >= 3)
+    if not q_tokens:
+        return kb_entries[:top_n]
 
-    Returns one of:
-      {"status": "match", "kb_id": "..."}
-      {"status": "ambiguous", "candidate_ids": [...], "clarify_question": "..."}
-      {"status": "none"}
+    scored = []
+    for e in kb_entries:
+        score = 0
+        kb_q_tokens = set(w.lower() for w in _re.split(r'\W+', e.get("question", "")) if len(w) >= 3)
+        score += len(q_tokens & kb_q_tokens) * 2          # question overlap weighted 2x
+        tag_tokens = set(t.lower() for t in (e.get("tags") or []))
+        score += len(q_tokens & tag_tokens) * 3           # tag overlap weighted 3x
+        ans_en = ((e.get("answers") or {}).get("en") or "").lower()
+        for tok in q_tokens:
+            if tok in ans_en:
+                score += 1                                 # answer content overlap
+        if score > 0:
+            scored.append((score, e))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    filtered = [e for _, e in scored[:top_n]]
+
+    # Pad with extra entries if not enough scored results
+    if len(filtered) < min(top_n, len(kb_entries)):
+        seen_ids = {e["id"] for e in filtered}
+        for e in kb_entries:
+            if len(filtered) >= top_n:
+                break
+            if e["id"] not in seen_ids:
+                filtered.append(e)
+    return filtered
+
+# ------------------------------------------------------------------
+# Single merged LLM call: match + rephrase + clarify all in one shot
+# For short/vague queries: surfaces real KB questions as clickable options
+# For clear queries: answers directly in user's language
+# Model: gpt-4o-mini (~20x cheaper than gpt-5.2, same quality for this)
+# ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Intent pre-classifier — runs BEFORE KB search
+# Catches: callback requests, executive requests, pricing, demo booking
+# These should NEVER hit the KB — they go straight to executive CTA
+# ------------------------------------------------------------------
+def _detect_direct_intent(question: str) -> Optional[str]:
     """
+    Returns an intent string if the query is clearly non-KB.
+    Returns None if it should go through normal KB matching.
+    """
+    q = question.lower().strip()
+
+    # Callback / call / contact / executive / talk to someone
+    callback_signals = [
+        "call back", "callback", "call me", "arrange a call", "schedule a call",
+        "book a call", "contact me", "reach me", "call from your team",
+        "talk with executive", "talk to executive", "speak with executive",
+        "speak to someone", "talk to someone", "talk to a person",
+        "connect me", "get in touch", "want to talk", "want to speak",
+        "want a call", "need a call", "sales team", "your team",
+        "executive", "sales person", "salesperson", "agent",
+        "कॉल करें", "कॉल बैक", "बात करना", "एग्जीक्यूटिव",
+        "ફોન કરો", "કૉલ બૅક", "વાત કરવી",
+        "कॉल करा", "बोलायचे आहे",
+    ]
+    if any(sig in q for sig in callback_signals):
+        return "executive_cta"
+
+    # Pricing / cost / how much
+    pricing_signals = [
+        "price", "pricing", "cost", "how much", "fee", "charges", "plan",
+        "subscription", "rate", "quote me", "quotation for me",
+        "कीमत", "मूल्य", "कितना", "शुल्क",
+        "ભાવ", "કેટલો", "ખર્ચ",
+        "किंमत", "किती",
+    ]
+    if any(sig in q for sig in pricing_signals):
+        return "pricing"
+
+    return None
+
+
+async def llm_match_and_answer(
+    question: str,
+    kb_entries: List[Dict],
+    lang: str,
+    is_short_query: bool = False,
+    ai_config: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     if not kb_entries:
         return {"status": "none"}
 
-    # Build compact KB list for the prompt (include answer snippet so the model can match on substance)
+    lang_name = LANG_NAMES.get(lang, "English")
+
     kb_lines = []
     for e in kb_entries:
-        tags = ", ".join(e.get("tags", []) or [])
-        ans_en = (e.get("answers") or {}).get("en") or next(iter((e.get("answers") or {}).values()), "")
-        ans_snip = (ans_en or "").replace("\n", " ").strip()
+        tags = ", ".join(e.get("tags") or [])
+        ans_en = ((e.get("answers") or {}).get("en") or
+                  next(iter((e.get("answers") or {}).values()), ""))
+        ans_snip = ans_en.replace("\n", " ").strip()
         if len(ans_snip) > 220:
             ans_snip = ans_snip[:220] + "…"
         kb_lines.append(
-            f'- id: {e["id"]}\n  question: "{e["question"]}"\n  tags: [{tags}]\n  answer_snippet: "{ans_snip}"'
+            f'- id: {e["id"]}\n  question: "{e["question"]}"\n  tags: [{tags}]\n  answer: "{ans_snip}"'
         )
     kb_block = "\n".join(kb_lines)
 
+    short_query_rule = (
+        "\nIMPORTANT — SHORT/VAGUE QUERY RULES:\n"
+        "The user typed a very short or vague query (1-3 words). Do NOT guess intent and answer directly.\n"
+        "Instead:\n"
+        "1. Look through the KB entries and find up to 3 entries whose questions are RELATED to the user's topic.\n"
+        "2. Return status='ambiguous' with those candidate_ids.\n"
+        "3. The user will then click the actual KB question that matches what they meant.\n"
+        "4. Only return status='match' if there is literally ONE possible interpretation and it is 100% crystal clear.\n"
+        "5. If no KB entries are related at all, return status='none'.\n"
+    ) if is_short_query else ""
+
     system_msg = (
-        "You are a semantic router for a SaaS product called Biziverse. "
-        "You receive a user question and a list of Knowledge Base (KB) entries (each has a question, tags, and an answer snippet). "
-        "Your job is to decide which KB entry — if any — answers the user's question.\n\n"
-        "Rules:\n"
-        "1. Match on TOPIC and INTENT, not just shared words. A KB entry matches if its answer_snippet covers the topic the user is asking about.\n"
-        "2. If the answer_snippet clearly addresses the user's question (even if the KB question is phrased differently), choose status='match'.\n"
-        "3. If 2-3 KB entries could plausibly answer it and you genuinely can't tell which one, choose status='ambiguous' and provide a short clarifying question.\n"
-        "4. If NO KB entry's answer_snippet covers the user's topic, choose status='none'. Do not invent.\n"
-        "5. A single shared keyword is NOT enough — there must be topical alignment with the answer.\n"
-        f"6. The clarify_question must be in {LANG_NAMES.get(lang, 'English')}.\n"
-        "7. Respond with ONLY a JSON object, no prose, no code fences."
+        "You are the AI assistant for Biziverse, a business SaaS product for Indian SMBs.\n\n"
+        "Your job: Given a user question and KB entries, return ONE JSON that does:\n\n"
+
+        "STEP 1 — UNDERSTAND INTENT DEEPLY:\n"
+        "  Before matching, ask yourself: What is the user ACTUALLY trying to do?\n"
+        "  - Are they asking about a Biziverse FEATURE? → search KB\n"
+        "  - Are they asking HOW TO DO something in Biziverse? → search KB\n"
+        "  - Are they asking to TALK TO SOMEONE / CALL BACK / EXECUTIVE? → status='none' (not a KB question)\n"
+        "  - Are they asking about PRICING / COST / PLANS? → status='none'\n"
+        "  - Are they asking something COMPLETELY UNRELATED to the product? → status='none'\n\n"
+
+        "STEP 2 — MATCH:\n"
+        "  - Match on TOPIC and INTENT, not just shared keywords.\n"
+        "  - 'salesperson' in KB about sales tracking ≠ 'talk to your salesperson' (that's executive CTA).\n"
+        "  - If one KB entry's answer clearly covers the question → status='match'\n"
+        "  - If 2-3 entries could plausibly match → status='ambiguous' with candidate_ids\n"
+        "  - If no entry covers it → status='none'\n"
+        f"{short_query_rule}\n"
+
+        "STEP 3 — ANSWER (only when status='match'):\n"
+        f"  - Write a clear, natural answer in {lang_name}.\n"
+        "  - Structure it well: lead with the direct answer (Yes/No), then explain briefly.\n"
+        "  - Use simple formatting if helpful: short sentences, one idea per line.\n"
+        "  - STRICTLY stay within KB facts. Do NOT invent features, prices, or capabilities.\n"
+        "  - 2 to 4 sentences max. No greetings, no markdown headers, no bullet overload.\n\n"
+
+        "Output ONLY a JSON object. No prose, no code fences."
     )
 
     user_prompt = (
         f"USER QUESTION: {question}\n\n"
         f"KB ENTRIES:\n{kb_block}\n\n"
-        "Output strictly this JSON shape:\n"
-        '{"status":"match"|"ambiguous"|"none", "kb_id":"<id or empty>", '
-        '"candidate_ids":["<id>", ...], "clarify_question":"<text or empty>"}'
+        "Respond with exactly this JSON (all keys required, empty string/array if unused):\n"
+        '{"status": "match" | "ambiguous" | "none", '
+        '"kb_id": "<matched entry id or empty>", '
+        '"answer": "<clear well-structured answer in user language, or empty>", '
+        '"candidate_ids": ["<id1>", "<id2>", "<id3>"], '
+        '"clarify_question": "<clarifying question or empty>"}'
     )
 
     try:
+        api_key = (ai_config or {}).get("api_key") or EMERGENT_LLM_KEY
+        model_conf = (ai_config or {}).get("llm_model") or DEFAULT_AI_SETTINGS["llm_model"]
+        provider = model_conf.get("provider", "openai")
+        model_name = model_conf.get("model", "gpt-4o-mini")
         chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"kb-match-{uuid.uuid4().hex[:8]}",
+            api_key=api_key,
+            session_id=f"kb-{uuid.uuid4().hex[:8]}",
             system_message=system_msg,
-        ).with_model("openai", "gpt-5.2")
+        ).with_model(provider, model_name)
         raw = await chat.send_message(UserMessage(text=user_prompt))
         data = _parse_llm_json(raw)
         if data.get("status") in ("match", "ambiguous", "none"):
             return data
     except Exception as e:
-        logger.error(f"llm_match_kb failed: {e}")
+        logger.error(f"llm_match_and_answer failed: {e}")
     return {"status": "none"}
 
-async def llm_rephrase_answer(question: str, kb_answer: str, lang: str) -> str:
-    """Rephrase KB answer naturally, grounded strictly in kb_answer.
-
-    The system prompt forbids adding facts not in kb_answer.
-    """
-    if not kb_answer:
-        return ""
-    system_msg = (
-        "You are Biziverse's friendly AI assistant. You will be given the user's question and a "
-        "GROUND TRUTH answer from our knowledge base. Rules:\n"
-        "1. Answer the user in a natural, conversational, helpful tone.\n"
-        "2. STRICTLY stay within the facts in GROUND TRUTH. Do NOT invent features, numbers, prices, or capabilities.\n"
-        "3. You may rephrase, reorder, and simplify, but every claim must be supported by GROUND TRUTH.\n"
-        f"4. Reply in {LANG_NAMES.get(lang, 'English')}.\n"
-        "5. Keep it concise — 1 to 3 short sentences. No greetings, no closing pleasantries, no markdown.\n"
-        "6. Output ONLY the answer text. No prefixes like 'Answer:' or 'Sure!'."
-    )
-    user_prompt = f"USER QUESTION: {question}\n\nGROUND TRUTH:\n{kb_answer}"
-    try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"kb-answer-{uuid.uuid4().hex[:8]}",
-            system_message=system_msg,
-        ).with_model("openai", "gpt-5.2")
-        raw = await chat.send_message(UserMessage(text=user_prompt))
-        return (raw or "").strip()
-    except Exception as e:
-        logger.error(f"llm_rephrase_answer failed: {e}")
-        return kb_answer  # fall back to raw KB answer
 
 @api.post("/ai/chat")
 async def ai_chat(payload: ChatIn):
@@ -550,36 +832,70 @@ async def ai_chat(payload: ChatIn):
         raise HTTPException(400, "Empty message")
     q_lower = q.lower()
 
-    # Quick greeting handler (avoid LLM call for trivial inputs)
+    settings = await get_main_settings()
+    ai_config = settings.get("ai_settings", DEFAULT_AI_SETTINGS)
+
+    # ── Quick greeting handler — zero LLM cost ──
     greetings = {"hi", "hello", "hey", "namaste", "hii", "helo", "hola", "नमस्ते", "नमस्कार"}
     if q_lower in greetings or len(q_lower) <= 2:
-        greet = {
-            "en": "Hi! I can answer questions about Biziverse. What would you like to know?",
-            "hi": "नमस्ते! मैं Biziverse के बारे में सवालों के जवाब दे सकता हूँ। आप क्या जानना चाहेंगे?",
-            "gu": "નમસ્તે! હું Biziverse વિશે પ્રશ્નોના જવાબ આપી શકું છું.",
-            "mr": "नमस्कार! मी Biziverse विषयी प्रश्नांची उत्तरे देऊ शकतो.",
+        return {
+            "answer": ai_config.get("greeting", {}).get(payload.language,
+                                                         DEFAULT_AI_SETTINGS["greeting"]["en"]),
+            "from_kb": False,
+            "no_answer": False,
+            "video_url": None
         }
-        return {"answer": greet.get(payload.language, greet["en"]),
-                "from_kb": False, "no_answer": False, "video_url": None}
 
-    # Load active KB entries
-    kb_entries = await db.kb_entries.find({"active": True}, {"_id": 0}).to_list(500)
+    # ── Intent pre-classifier — catches executive/callback/pricing BEFORE KB ──
+    direct_intent = _detect_direct_intent(q)
+
+    if direct_intent == "executive_cta":
+        return {
+            "answer": ai_config.get("executive_response", {}).get(payload.language,
+                                                                    DEFAULT_AI_SETTINGS["executive_response"]["en"]),
+            "from_kb": False,
+            "no_answer": bool(ai_config.get("show_exec_cta_on_direct_intent", True)),
+            "video_url": None,
+        }
+
+    if direct_intent == "pricing":
+        return {
+            "answer": ai_config.get("pricing_response", {}).get(payload.language,
+                                                                   DEFAULT_AI_SETTINGS["pricing_response"]["en"]),
+            "from_kb": False,
+            "no_answer": bool(ai_config.get("show_exec_cta_on_direct_intent", True)),
+            "video_url": None,
+        }
+
+    # ── Load KB from cache ──
+    kb_entries = await get_kb_entries_cached()
     if not kb_entries:
         return await _log_and_fallback(payload, q)
 
-    # Stage 1: GPT-5.2 semantic match
-    match = await llm_match_kb(q, kb_entries, payload.language)
+    # ── Short/vague query detection ──
+    word_count = len(q.split())
+    is_short_query = word_count <= 3
+    top_n = 20 if is_short_query else 15
+
+    # ── Keyword pre-filter → top N candidates only ──
+    candidates = _keyword_prefilter(q, kb_entries, top_n=top_n)
+
+    # ── Single LLM call: understand + match + answer ──
+    result = await llm_match_and_answer(q, candidates, payload.language, is_short_query, ai_config)
+
     by_id = {e["id"]: e for e in kb_entries}
 
-    if match.get("status") == "match":
-        kb_id = match.get("kb_id")
+    # ── Case 1: Clear match ──
+    if result.get("status") == "match":
+        kb_id = result.get("kb_id", "")
         e = by_id.get(kb_id)
         if e:
-            kb_answer = (e.get("answers") or {}).get(payload.language) or (e.get("answers") or {}).get("en") or ""
-            # Stage 2: rephrase naturally, grounded
-            nat = await llm_rephrase_answer(q, kb_answer, payload.language)
+            answer = result.get("answer", "").strip()
+            if not answer:
+                answer = ((e.get("answers") or {}).get(payload.language)
+                          or (e.get("answers") or {}).get("en", ""))
             return {
-                "answer": nat or kb_answer,
+                "answer": answer,
                 "from_kb": True,
                 "no_answer": False,
                 "kb_id": e["id"],
@@ -588,31 +904,54 @@ async def ai_chat(payload: ChatIn):
                 "video_start": e.get("video_start"),
                 "video_end": e.get("video_end"),
             }
-        # Fall through if model returned an unknown id
 
-    if match.get("status") == "ambiguous":
-        cand_ids = match.get("candidate_ids") or []
-        candidates = [by_id[c] for c in cand_ids if c in by_id][:3]
-        if candidates:
-            clarify_q = match.get("clarify_question") or {
-                "en": "Could you clarify what you mean?",
-                "hi": "क्या आप थोड़ा और स्पष्ट कर सकते हैं?",
-                "gu": "શું તમે થોડું વધુ સ્પષ્ટ કરી શકશો?",
-                "mr": "तुम्ही थोडे अधिक स्पष्ट करू शकता का?",
-            }.get(payload.language, "Could you clarify what you mean?")
+    # ── Case 2: Ambiguous — show real KB questions as options ──
+    if result.get("status") == "ambiguous":
+        cand_ids = result.get("candidate_ids") or []
+        ambig_candidates = [by_id[c] for c in cand_ids if c in by_id][:3]
+
+        if ambig_candidates:
+            clarify_intro = {
+                "en": "Did you mean one of these?",
+                "hi": "क्या आप इनमें से कोई एक पूछ रहे हैं?",
+                "gu": "શું તमे आमाथी कंई पूछवा मांगो छो?",
+                "mr": "तुम्हाला यापैकी काही विचारायचे आहे का?",
+            }.get(payload.language, "Did you mean one of these?")
+
             return {
-                "answer": clarify_q,
+                "answer": clarify_intro,
                 "clarify": True,
-                "candidates": [{"id": c["id"], "question": c["question"]} for c in candidates],
+                "candidates": [
+                    {"id": c["id"], "question": c["question"]}
+                    for c in ambig_candidates
+                ],
                 "from_kb": False,
                 "no_answer": False,
                 "video_url": None,
             }
 
-    return await _log_and_fallback(payload, q)
+        # Ambiguous but no valid candidates found
+        elaborate = {
+            "en": "Could you describe what you're looking for in a bit more detail?",
+            "hi": "क्या आप थोड़ा और विस्तार से बता सकते हैं?",
+            "gu": "શું तमे थोडी वधु विगत आपी शको?",
+            "mr": "तुम्ही थोडे अधिक तपशील देऊ शकता का?",
+        }.get(payload.language, "Could you describe what you're looking for in a bit more detail?")
 
+        return {
+            "answer": elaborate,
+            "clarify": True,
+            "candidates": [],
+            "from_kb": False,
+            "no_answer": bool(ai_config.get("show_exec_cta_on_ambiguous", False)),
+            "video_url": None,
+        }
 
-async def _log_and_fallback(payload: ChatIn, q: str):
+    # ── Case 3: No match — log + executive CTA ──
+    return await _log_and_fallback(payload, q, ai_config)
+
+async def _log_and_fallback(payload: ChatIn, q: str, ai_config: Dict[str, Any]):
+    """Log unanswered question for admin review and return executive CTA."""
     await db.unanswered_questions.insert_one({
         "id": f"uq_{uuid.uuid4().hex[:10]}",
         "session_id": payload.session_id,
@@ -624,14 +963,13 @@ async def _log_and_fallback(payload: ChatIn, q: str):
         "resolved": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
-    fallback = {
-        "en": "I don't have an answer for that yet. Would you like to talk with an executive?",
-        "hi": "मेरे पास इसका जवाब अभी नहीं है। क्या आप किसी executive से बात करना चाहेंगे?",
-        "gu": "મારી પાસે હાલ આ જવાબ નથી. શું તમે executive સાથે વાત કરવા માંગો છો?",
-        "mr": "माझ्याकडे या प्रश्नाचे उत्तर अद्याप नाही. कार्यकारीशी बोलू इच्छिता?",
+    fallback = ai_config.get("fallback_response", {})
+    return {
+        "answer": fallback.get(payload.language, DEFAULT_AI_SETTINGS["fallback_response"]["en"]),
+        "from_kb": False,
+        "no_answer": bool(ai_config.get("show_exec_cta_on_no_answer", True)),
+        "video_url": None
     }
-    return {"answer": fallback.get(payload.language, fallback["en"]),
-            "from_kb": False, "no_answer": True, "video_url": None}
 
 # ========== Signup (Mocked OTP + Razorpay) ==========
 @api.post("/signup/otp/send")
@@ -644,7 +982,7 @@ async def otp_send(payload: OTPSendIn):
                                        "used": False}},
                              upsert=True)
     logger.info(f"[MOCK OTP] {payload.mobile} -> {code}")
-    return {"ok": True, "mock_otp": code}  # MOCKED: returned to client for demo
+    return {"ok": True, "mock_otp": code}
 
 @api.post("/signup/otp/verify")
 async def otp_verify(payload: OTPVerifyIn):
@@ -661,7 +999,6 @@ async def otp_verify(payload: OTPVerifyIn):
     if rec["otp"] != payload.otp:
         raise HTTPException(400, "Invalid OTP")
     await db.otps.update_one({"mobile": payload.mobile}, {"$set": {"used": True}})
-    # Persist signup intent
     signup_id = f"signup_{uuid.uuid4().hex[:10]}"
     await db.signups.insert_one({
         "signup_id": signup_id,
@@ -673,7 +1010,6 @@ async def otp_verify(payload: OTPVerifyIn):
 
 @api.post("/signup/payment")
 async def payment(payload: PaymentIn):
-    # MOCKED Razorpay
     plan_amount = 99900 if payload.plan == "monthly" else 999900
     order_id = f"order_mock_{uuid.uuid4().hex[:10]}"
     await db.payments.insert_one({
@@ -683,24 +1019,489 @@ async def payment(payload: PaymentIn):
     })
     return {"ok": True, "order_id": order_id, "amount": plan_amount, "status": "success", "mocked": True}
 
+# ========== Biziverse CRM Lead Push ==========
+
+BIZIVERSE_API_KEY = os.environ.get("BIZIVERSE_API_KEY", "0006-BE252952-CF86-4E97-9E7A-7E2E6113AFE7-8055")
+BIZIVERSE_API_URL = "https://biziverse.com/PremiumAPI.asmx/setAPI"
+
+@api.post("/callback/request")
+async def callback_request(payload: CallbackRequestIn):
+    """
+    Called when user requests a callback from the demo.
+    1. Saves to MongoDB for admin analytics
+    2. Pushes a lead to Biziverse CRM with full demo context
+    """
+
+    # ── Validate phone ──
+    phone = payload.phone.strip().replace(" ", "")
+    phone = phone.replace("+91", "").replace("-", "")
+    phone = ''.join(filter(str.isdigit, phone))
+    if phone.startswith("91") and len(phone) == 12:
+        phone = phone[2:]
+    if len(phone) != 10:
+        raise HTTPException(400, "Invalid phone number")
+
+    # ── Save to MongoDB ──
+    cb_id = f"cb_{uuid.uuid4().hex[:10]}"
+    await db.callback_requests.insert_one({
+        "id": cb_id,
+        "phone": phone,
+        "callback_time": payload.callback_time,
+        "session_id": payload.session_id,
+        "business_type": payload.business_type,
+        "product_category": payload.product_category,
+        "modules_watched": payload.modules_watched or [],
+        "questions_asked": payload.questions_asked or [],
+        "language": payload.language,
+        "human_now": bool(payload.human_now),
+        "voice_requested": bool(payload.voice_requested),
+        "request_note": payload.request_note or "",
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+
+    live_lead_id = None
+    if payload.human_now:
+        live_lead_id = f"ll_{uuid.uuid4().hex[:10]}"
+        await db.live_leads.insert_one({
+            "id": live_lead_id,
+            "callback_request_id": cb_id,
+            "phone": phone,
+            "session_id": payload.session_id,
+            "business_type": payload.business_type,
+            "product_category": payload.product_category,
+            "modules_watched": payload.modules_watched or [],
+            "questions_asked": payload.questions_asked or [],
+            "language": payload.language,
+            "voice_requested": bool(payload.voice_requested),
+            "request_note": payload.request_note or "",
+            "status": "pending",
+            "assigned_to": None,
+            "industry": None,
+            "sector": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        })
+
+    # ── Build the "needs" string with full demo context ──
+    needs_parts = []
+
+    # Preferred callback time
+    try:
+        dt = datetime.fromisoformat(payload.callback_time.replace("Z", "+00:00"))
+        needs_parts.append(f"Callback requested: {dt.strftime('%d %b %Y at %I:%M %p')}")
+    except Exception:
+        needs_parts.append(f"Callback time: {payload.callback_time}")
+
+    # Business context
+    if payload.business_type:
+        needs_parts.append(f"Business type: {payload.business_type}")
+    if payload.product_category:
+        needs_parts.append(f"Product category: {payload.product_category}")
+
+    # Modules they watched
+    if payload.modules_watched:
+        needs_parts.append(f"Modules watched: {', '.join(payload.modules_watched)}")
+
+    # Questions they asked in AI chat
+    if payload.questions_asked:
+        needs_parts.append(f"Questions asked: {' | '.join(payload.questions_asked[:10])}")
+
+    needs_str = " | ".join(needs_parts)
+
+    # ── Build lead payload for Biziverse CRM ──
+    lead_data = {
+        "companyName": f"Demo Lead - {phone}",
+        "title": "",
+        "firstName": "Demo",
+        "lastName": "Lead",
+        "email": "",
+        "mobile": phone,
+        "designation": "",
+        "city": "",
+        "state": "",
+        "needs": needs_str,
+        "source": "Biziverse Smart Demo"
+    }
+
+    api_params = json.dumps([{
+        "moduleID": 25,
+        "actionType": "setLead",
+        "data": json.dumps([lead_data])
+    }])
+
+    # ── Push to Biziverse CRM ──
+    crm_status = "unknown"
+    try:
+        r = requests.post(
+            BIZIVERSE_API_URL,
+            data={"apiKey": BIZIVERSE_API_KEY, "apiParams": api_params},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+            verify=False
+        )
+        txt = r.text
+        logger.info(f"Biziverse CRM response for {phone}: {txt}")
+
+        if "-1" in txt or "Lead saved" in txt:
+            crm_status = "created"
+        elif "305" in txt:
+            crm_status = "duplicate"   # lead already exists — that's fine
+        elif "200" in txt:
+            crm_status = "invalid_api_key"
+        elif "201" in txt:
+            crm_status = "data_missing"
+        else:
+            crm_status = f"unknown_response: {txt[:100]}"
+
+    except Exception as e:
+        logger.error(f"Biziverse CRM push failed for {phone}: {e}")
+        crm_status = f"error: {str(e)}"
+
+    # ── Update MongoDB with CRM result ──
+    await db.callback_requests.update_one(
+        {"id": cb_id},
+        {"$set": {"crm_status": crm_status, "crm_pushed_at": datetime.now(timezone.utc).isoformat()}}
+    )
+
+    return {
+        "ok": True,
+        "callback_id": cb_id,
+        "crm_status": crm_status,
+        "live_lead_id": live_lead_id
+    }
+
+
+@api.post("/live-leads/{lead_id}/messages")
+async def add_live_lead_message(lead_id: str, payload: LiveLeadMessageIn):
+    if payload.role not in {"user", "agent"}:
+        raise HTTPException(400, "Invalid role")
+    if payload.type not in {"text", "audio"}:
+        raise HTTPException(400, "Invalid message type")
+    if payload.type == "text" and not payload.text:
+        raise HTTPException(400, "Text is required for text messages")
+    if payload.type == "audio" and not payload.audio_data:
+        raise HTTPException(400, "Audio data is required for audio messages")
+    msg_id = f"llm_{uuid.uuid4().hex[:10]}"
+    doc = {
+        "id": msg_id,
+        "live_lead_id": lead_id,
+        "role": payload.role,
+        "type": payload.type,
+        "text": payload.text or "",
+        "audio_data": payload.audio_data or None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.live_lead_messages.insert_one(doc)
+    await db.live_leads.update_one({"id": lead_id}, {"$set": {"updated_at": datetime.now(timezone.utc).isoformat()}})
+    # Broadcast real-time to connected clients: lead channel and session channel
+    try:
+        # send minimal payload
+        push = {
+            "type": "new_message",
+            "message": {
+                "id": msg_id,
+                "live_lead_id": lead_id,
+                "role": doc["role"],
+                "type": doc["type"],
+                "text": doc["text"],
+                "created_at": doc["created_at"],
+            }
+        }
+        # lead channel
+        await ws_manager.broadcast(f"lead:{lead_id}", push)
+        # session channel if available
+        lead = await db.live_leads.find_one({"id": lead_id})
+        if lead and lead.get("session_id"):
+            await ws_manager.broadcast(f"session:{lead.get('session_id')}", push)
+    except Exception:
+        logger.exception("Failed to broadcast live lead message")
+
+    return {"ok": True, "message_id": msg_id}
+
+@api.get("/live-leads/{lead_id}/messages")
+async def list_live_lead_messages(lead_id: str):
+    items = await db.live_lead_messages.find({"live_lead_id": lead_id}, {"_id": 0}).sort("created_at", 1).to_list(1000)
+    return items
+
+@api.get("/live-leads/{lead_id}")
+async def get_live_lead(lead_id: str):
+    lead = await db.live_leads.find_one({"id": lead_id}, {"_id": 0})
+    if not lead:
+        raise HTTPException(404, "Live lead not found")
+    return lead
+
+
+@api.get("/live-leads/session/{session_id}")
+async def get_live_lead_by_session(session_id: str):
+    """Return the live lead for a given demo `session_id` if one exists."""
+    lead = await db.live_leads.find_one({"session_id": session_id}, {"_id": 0})
+    if not lead:
+        raise HTTPException(404, "Live lead not found for session")
+    return lead
+
+@api.get("/admin/live-leads")
+async def admin_list_live_leads(user=Depends(admin_dep)):
+    items = await db.live_leads.find({}, {"_id": 0}).sort([("status", 1), ("created_at", -1)]).to_list(500)
+    return items
+
+@api.post("/admin/live-leads/{lead_id}/assign")
+async def assign_live_lead(lead_id: str, user=Depends(admin_dep)):
+    lead = await db.live_leads.find_one({"id": lead_id})
+    if not lead:
+        raise HTTPException(404, "Live lead not found")
+    # Mark the lead as in-session/live and record assignment
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.live_leads.update_one({"id": lead_id}, {
+        "$set": {
+            "assigned_to": user["user_id"],
+            "status": "in_session",
+            "in_session_at": now_iso,
+            "updated_at": now_iso
+        }
+    })
+
+    # Insert a system message indicating the agent joined
+    try:
+        msg_id = f"llm_{uuid.uuid4().hex[:10]}"
+        await db.live_lead_messages.insert_one({
+            "id": msg_id,
+            "live_lead_id": lead_id,
+            "role": "agent",
+            "type": "text",
+            "text": f"Agent {user.get('name', user.get('user_id'))} has joined the chat.",
+            "created_at": now_iso,
+        })
+    except Exception:
+        logger.exception("Failed to insert agent-joined message")
+
+    # Return updated lead document so frontend can open the detail view
+    updated = await db.live_leads.find_one({"id": lead_id}, {"_id": 0})
+    # Broadcast agent joined to session and lead channels
+    try:
+        payload = {"type": "agent_joined", "agent": {"user_id": user["user_id"], "name": user.get("name")}, "lead": {"id": lead_id}}
+        await ws_manager.broadcast(f"lead:{lead_id}", payload)
+        if updated and updated.get("session_id"):
+            await ws_manager.broadcast(f"session:{updated.get('session_id')}", payload)
+    except Exception:
+        logger.exception("Failed to broadcast agent_joined")
+    return {"ok": True, "lead": updated}
+
+
+@api.post("/admin/kb/suggest")
+async def admin_kb_suggest(payload: Dict[str, Any], user=Depends(admin_dep)):
+    """Return KB candidate entries for an agent given a question.
+
+    Expects JSON: {"question": "...", "top_n": 5}
+    """
+    q = (payload.get("question") or "").strip()
+    if not q:
+        raise HTTPException(400, "Question is required")
+    top_n = int(payload.get("top_n", 5))
+    kb_entries = await get_kb_entries_cached()
+    if not kb_entries:
+        return {"candidates": []}
+    candidates = _keyword_prefilter(q, kb_entries, top_n=top_n)
+    # Trim and present lightweight fields
+    out = []
+    for e in candidates:
+        ans = ((e.get("answers") or {}).get("en") or "").strip()
+        snippet = ans[:300] + ("…" if len(ans) > 300 else "")
+        out.append({"id": e["id"], "question": e.get("question"), "snippet": snippet})
+    return {"candidates": out}
+
+
+@api.websocket("/ws/live/{channel}")
+async def ws_live(channel: str, websocket: WebSocket):
+    """WebSocket endpoint. `channel` should be of form `lead:<lead_id>` or `session:<session_id>`.
+    Clients may send pings but server does not expect to receive meaningful messages.
+    """
+    # Determine channel type
+    is_lead = channel.startswith("lead:")
+    is_session = channel.startswith("session:")
+
+    # If this is a lead channel (agent side), require admin auth
+    admin_user = None
+    try:
+        if is_lead:
+            # extract token from cookie header or Authorization header
+            headers = dict(websocket.headers)
+            cookie = headers.get("cookie", "")
+            session_token = None
+            if cookie:
+                # parse simple cookie string
+                parts = [p.strip() for p in cookie.split(";") if p.strip()]
+                for p in parts:
+                    if p.startswith("session_token="):
+                        session_token = p.split("=", 1)[1]
+                        break
+            authorization = headers.get("authorization")
+            try:
+                admin_user = await get_current_admin(session_token=session_token, authorization=authorization)
+            except HTTPException:
+                # refuse connection
+                await websocket.close(code=1008)
+                return
+
+    except Exception:
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+        return
+
+    # register websocket
+    await ws_manager.connect(channel, websocket)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text(json.dumps({"type": "pong"}))
+                continue
+
+            # try parse as JSON
+            try:
+                obj = json.loads(data)
+            except Exception:
+                obj = None
+
+            # Handle typing/presence events and forward between session<->lead channels
+            if isinstance(obj, dict) and obj.get("type") in {"typing", "presence", "message"}:
+                typ = obj.get("type")
+                payload = obj.get("payload", {})
+                # If this connection is a session channel, forward to lead channel(s)
+                if is_session:
+                    sess_id = channel.split(":", 1)[1]
+                    # find live lead for this session
+                    lead = await db.live_leads.find_one({"session_id": sess_id}, {"_id": 0})
+                    if lead:
+                        target = f"lead:{lead['id']}"
+                        await ws_manager.broadcast(target, {"type": typ, "from": "user", "payload": payload})
+                # If this connection is a lead channel, forward to session channel
+                elif is_lead:
+                    lead_id = channel.split(":", 1)[1]
+                    lead = await db.live_leads.find_one({"id": lead_id}, {"_id": 0})
+                    if lead and lead.get("session_id"):
+                        target = f"session:{lead.get('session_id')}"
+                        await ws_manager.broadcast(target, {"type": typ, "from": "agent", "payload": payload})
+                continue
+
+            # otherwise ignore
+    except WebSocketDisconnect:
+        ws_manager.disconnect(channel, websocket)
+    except Exception:
+        try:
+            ws_manager.disconnect(channel, websocket)
+        except Exception:
+            pass
+
+@api.put("/admin/live-leads/{lead_id}")
+async def update_live_lead(lead_id: str, payload: LiveLeadUpdateIn, user=Depends(admin_dep)):
+    update_doc = {}
+    if payload.assigned_to is not None:
+        update_doc["assigned_to"] = payload.assigned_to
+    if payload.status is not None:
+        update_doc["status"] = payload.status
+    if payload.industry is not None:
+        update_doc["industry"] = payload.industry
+    if payload.sector is not None:
+        update_doc["sector"] = payload.sector
+    if update_doc:
+        update_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await db.live_leads.update_one({"id": lead_id}, {"$set": update_doc})
+    return await db.live_leads.find_one({"id": lead_id}, {"_id": 0})
+
+@api.post("/auth/login")
+async def auth_login(payload: AuthLoginIn, response: Response):
+    user = await db.users.find_one({"user_id": payload.user_id})
+    if not user or not user.get("password_hash"):
+        raise HTTPException(401, "Invalid credentials")
+    if not verify_password(payload.password, user["password_hash"]):
+        raise HTTPException(401, "Invalid credentials")
+    session_token = uuid.uuid4().hex
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    await db.user_sessions.insert_one({
+        "user_id": user["user_id"],
+        "session_token": session_token,
+        "expires_at": expires_at.isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    response.set_cookie("session_token", session_token, max_age=7*24*3600,
+                        httponly=True, secure=True, samesite="none", path="/")
+    return {"user_id": user["user_id"], "email": user.get("email"), "name": user.get("name"), "picture": user.get("picture"), "role": user.get("role")}
+
+@api.get("/admin/users")
+async def admin_list_users(user=Depends(admin_dep)):
+    items = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(500)
+    return items
+
+@api.post("/admin/users")
+async def admin_create_user(payload: AdminUserIn, user=Depends(admin_dep)):
+    if not payload.password:
+        raise HTTPException(400, "Password is required")
+    existing = await db.users.find_one({"user_id": payload.user_id})
+    if existing:
+        raise HTTPException(400, "User already exists")
+    doc = {
+        "user_id": payload.user_id,
+        "email": payload.email,
+        "name": payload.name or payload.user_id,
+        "role": payload.role or "agent",
+        "password_hash": hash_password(payload.password),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.users.insert_one(doc)
+    doc.pop("password_hash", None)
+    return doc
+
+@api.put("/admin/users/{user_id}")
+async def admin_update_user(user_id: str, payload: AdminUserUpdateIn, user=Depends(admin_dep)):
+    update_doc = {}
+    if payload.email is not None:
+        update_doc["email"] = payload.email
+    if payload.name is not None:
+        update_doc["name"] = payload.name
+    if payload.role is not None:
+        update_doc["role"] = payload.role
+    if payload.password is not None:
+        update_doc["password_hash"] = hash_password(payload.password)
+    if update_doc:
+        await db.users.update_one({"user_id": user_id}, {"$set": update_doc})
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+    if not user_doc:
+        raise HTTPException(404, "User not found")
+    return user_doc
+
+@api.delete("/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, user=Depends(admin_dep)):
+    await db.users.delete_one({"user_id": user_id})
+    return {"ok": True}
+
+@api.get("/admin/callbacks")
+async def list_callbacks(user=Depends(admin_dep)):
+    """Admin view of all callback requests."""
+    items = await db.callback_requests.find({}, {"_id": 0}).sort("created_at", -1).limit(200).to_list(200)
+    return items    
+
 # ========== Settings ==========
 @api.get("/settings")
 async def get_settings_public():
-    s = await db.settings.find_one({"_id": "main"}, {"_id": 0}) or {}
+    settings = await get_main_settings()
     return {
-        "show_executive_cta": s.get("show_executive_cta", True),
-        "executive_phone": s.get("executive_phone", ""),
+        "show_executive_cta": settings.get("show_executive_cta", True),
+        "executive_phone": settings.get("executive_phone", ""),
+        "ai_settings": settings.get("ai_settings", DEFAULT_AI_SETTINGS)
     }
 
 @api.get("/admin/settings")
 async def get_settings(user=Depends(admin_dep)):
-    s = await db.settings.find_one({"_id": "main"}, {"_id": 0}) or {}
-    return s
+    return await get_main_settings()
 
 @api.put("/admin/settings")
 async def set_settings(payload: Dict[str, Any], user=Depends(admin_dep)):
     await db.settings.update_one({"_id": "main"}, {"$set": payload}, upsert=True)
-    return await db.settings.find_one({"_id": "main"}, {"_id": 0}) or {}
+    return await get_main_settings()
 
 # ========== Unanswered Questions ==========
 @api.get("/admin/unanswered")
@@ -775,7 +1576,6 @@ async def list_flows(user=Depends(admin_dep)):
 
 @api.post("/admin/flows")
 async def create_flow(payload: FlowIn, user=Depends(admin_dep)):
-    # check duplicate
     existing = await db.demo_flows.find_one({
         "business_type": payload.business_type,
         "product_category": payload.product_category,
@@ -810,6 +1610,7 @@ async def list_kb(user=Depends(admin_dep)):
 
 @api.post("/admin/kb")
 async def create_kb(payload: KBEntryIn, user=Depends(admin_dep)):
+    invalidate_kb_cache()
     kid = f"kb_{uuid.uuid4().hex[:10]}"
     doc = payload.model_dump()
     doc.update({"id": kid, "created_at": datetime.now(timezone.utc).isoformat()})
@@ -819,13 +1620,160 @@ async def create_kb(payload: KBEntryIn, user=Depends(admin_dep)):
 
 @api.put("/admin/kb/{kid}")
 async def update_kb(kid: str, payload: KBEntryIn, user=Depends(admin_dep)):
+    invalidate_kb_cache()
     await db.kb_entries.update_one({"id": kid}, {"$set": payload.model_dump()})
     return await db.kb_entries.find_one({"id": kid}, {"_id": 0})
 
 @api.delete("/admin/kb/{kid}")
 async def delete_kb(kid: str, user=Depends(admin_dep)):
+    invalidate_kb_cache()
     await db.kb_entries.delete_one({"id": kid})
     return {"ok": True}
+
+# ========== Admin: Bulk KB Upload ==========
+@api.post("/admin/kb/bulk-upload")
+async def bulk_kb_upload(
+    file: UploadFile = File(...),
+    on_duplicate: str = Query("overwrite"),
+    user=Depends(admin_dep)
+):
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(400, "Only .csv files are supported")
+
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+
+    # Auto-detect tab vs comma delimiter
+    sample = text[:2000]
+    delimiter = "\t" if sample.count("\t") > sample.count(",") else ","
+    reader = csv.DictReader(_io.StringIO(text), delimiter=delimiter)
+
+    required = {"question", "answer_en"}
+    if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+        raise HTTPException(
+            400,
+            f"CSV must have at minimum: {required}. Found: {reader.fieldnames}"
+        )
+
+    answer_cols = [col for col in (reader.fieldnames or []) if col.startswith("answer_")]
+    lang_codes = [col.replace("answer_", "") for col in answer_cols]
+
+    inserted = 0
+    skipped = 0
+    overwritten = 0
+    errors = []
+
+    for i, row in enumerate(reader, start=2):
+        question = (row.get("question") or "").strip()
+        answer_en = (row.get("answer_en") or "").strip()
+
+        if not question or not answer_en:
+            errors.append(f"Row {i}: 'question' and 'answer_en' are required — skipped")
+            continue
+
+        answers: Dict[str, str] = {}
+        for lang in lang_codes:
+            val = (row.get(f"answer_{lang}") or "").strip()
+            if val:
+                answers[lang] = val
+
+        tags_raw = (row.get("tags") or "").strip()
+        tags = [t.strip().lower() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
+
+        video_url = (row.get("video_url") or "").strip() or None
+        video_start = (row.get("video_start") or "").strip()
+        video_end = (row.get("video_end") or "").strip()
+        try:
+            video_start = float(video_start) if video_start else None
+        except ValueError:
+            video_start = None
+        try:
+            video_end = float(video_end) if video_end else None
+        except ValueError:
+            video_end = None
+
+        existing = await db.kb_entries.find_one(
+            {"question": question}, {"_id": 0, "id": 1}
+        )
+
+        if existing:
+            if on_duplicate == "skip":
+                skipped += 1
+                continue
+            else:  # overwrite
+                await db.kb_entries.update_one(
+                    {"question": question},
+                    {"$set": {
+                        "answers": answers,
+                        "tags": tags,
+                        "video_url": video_url,
+                        "video_start": video_start,
+                        "video_end": video_end,
+                        "active": True,
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }}
+                )
+                overwritten += 1
+                continue
+
+        await db.kb_entries.insert_one({
+            "id": f"kb_{uuid.uuid4().hex[:10]}",
+            "question": question,
+            "answers": answers,
+            "tags": tags,
+            "video_url": video_url,
+            "video_start": video_start,
+            "video_end": video_end,
+            "active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+        inserted += 1
+
+    invalidate_kb_cache()
+
+    return {
+        "ok": True,
+        "inserted": inserted,
+        "skipped": skipped,
+        "overwritten": overwritten,
+        "errors": errors,
+        "languages_detected": lang_codes
+    }
+
+
+@api.get("/admin/kb/template")
+async def kb_csv_template(user=Depends(admin_dep)):
+    """Download a CSV template with columns for every configured language."""
+    languages = await get_languages_list()
+    lang_answer_cols = [f"answer_{l['code']}" for l in languages]
+    all_cols = ["question"] + lang_answer_cols + ["tags", "video_url", "video_start", "video_end"]
+
+    example_row = {
+        "question": "Does Biziverse support <feature>?",
+        "tags": "tag1,tag2",
+        "video_url": "",
+        "video_start": "",
+        "video_end": ""
+    }
+    for l in languages:
+        example_row[f"answer_{l['code']}"] = (
+            "Yes — this feature is supported." if l["code"] == "en"
+            else f"Answer in {l['label']} (optional)"
+        )
+
+    output = _io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=all_cols, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerow(example_row)
+
+    return Response(
+        content=output.getvalue().encode("utf-8-sig"),  # BOM for Excel compatibility
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=kb_template.csv"}
+    )
 
 # ========== Admin: Quiz Options ==========
 @api.get("/admin/quiz-options")
@@ -853,6 +1801,8 @@ async def admin_get_module_labels(user=Depends(admin_dep)):
 
 @api.put("/admin/module-labels")
 async def admin_set_module_labels(payload: Dict[str, Any], user=Depends(admin_dep)):
+    global _module_labels_cache
+    _module_labels_cache = None  # invalidate cache
     labels = payload.get("labels") or {}
     if not isinstance(labels, dict):
         raise HTTPException(400, "Body must be {'labels': {module_key: {lang: text}}}")
@@ -876,7 +1826,6 @@ async def admin_set_languages(payload: Dict[str, Any], user=Depends(admin_dep)):
     langs = payload.get("languages") or []
     if not isinstance(langs, list):
         raise HTTPException(400, "Body must be {'languages': [{code, label, native}, ...]}")
-    # Validate shape
     cleaned = []
     seen = set()
     for l in langs:
@@ -929,7 +1878,6 @@ async def funnel(user=Depends(admin_dep)):
     demo_started = await db.events.distinct("session_id", {"event_type": "demo_started"})
     conversion_views = await db.events.distinct("session_id", {"event_type": "demo_ended"})
     signup_init = await db.events.distinct("session_id", {"event_type": "offers_selected"})
-    paid = await db.payments.count_documents({"status": "success"})
 
     funnel_data = [
         {"stage": "Landing", "count": sessions_total},
@@ -939,7 +1887,6 @@ async def funnel(user=Depends(admin_dep)):
         {"stage": "Offers Selected", "count": len(signup_init)},
         {"stage": "Callbacks Scheduled", "count": await db.events.count_documents({"event_type": "callback_requested"})},
     ]
-    # popular flows
     pipeline = [{"$group": {"_id": {"bt": "$business_type", "pc": "$product_category"}, "count": {"$sum": 1}}},
                 {"$sort": {"count": -1}}, {"$limit": 10}]
     pop = await db.sessions.aggregate(pipeline).to_list(10)
@@ -961,12 +1908,10 @@ async def session_detail(sid: str, user=Depends(admin_dep)):
 @api.post("/seed")
 async def seed_data():
     """Seed default demo data so app works out-of-the-box."""
-    # Check if already seeded
     existing = await db.module_videos.count_documents({})
     if existing > 0:
         return {"ok": True, "already_seeded": True}
 
-    # Seed the two real videos provided by user
     seed_videos = [
         {"module_key": "crm", "title": "CRM — Leads Management",
          "video_url": "https://www.youtube.com/embed/ch3VGEvq71U"},
@@ -982,7 +1927,7 @@ async def seed_data():
              "narration": {
                  "en": f"Welcome! This is the {sv['title']} screen — see how easy this is.",
                  "hi": f"नमस्ते! यह {sv['title']} स्क्रीन है — देखें कितना आसान है।",
-                 "gu": f"નમસ્તે! આ {sv['title']} સ્ક્રીન છે — જુઓ કેટલું સરળ છે.",
+                 "gu": f"નમસ્તે! આ {sv['title']} સ્ક્રīн છે — જુઓ કેટलું સरળ છे.",
                  "mr": f"नमस्कार! ही {sv['title']} स्क्रीन आहे — पहा किती सोपे आहे."}},
             {"id": str(uuid.uuid4()), "timestamp": 20.0, "pause_duration": 5,
              "highlight": {"x": 45, "y": 35, "w": 40, "h": 18, "shape": "rect"},
@@ -990,7 +1935,7 @@ async def seed_data():
              "narration": {
                  "en": "Your data is organized here with full history — all in one place.",
                  "hi": "आपका डेटा यहां पूरे इतिहास के साथ संगठित है।",
-                 "gu": "તમારો ડેટા અહીં સંપૂર્ણ ઇતિહાસ સાથે છે.",
+                 "gu": "તمارो ડेटा અहीं સंपूर्ण ઇतिहास साथे छे.",
                  "mr": "तुमचा डेटा येथे पूर्ण इतिहासासह आहे."}},
             {"id": str(uuid.uuid4()), "timestamp": 45.0, "pause_duration": 5,
              "highlight": {"x": 30, "y": 55, "w": 50, "h": 15, "shape": "rect"},
@@ -998,7 +1943,7 @@ async def seed_data():
              "narration": {
                  "en": "You currently have ₹3,42,000 pending. Tracking this improves cash flow.",
                  "hi": "आपके ₹3,42,000 बाकी हैं। इसे ट्रैक करना cashflow बेहतर करता है।",
-                 "gu": "તમારે ₹3,42,000 બાકી છે.",
+                 "gu": "તمारे ₹3,42,000 બाकी छे.",
                  "mr": "तुमचे ₹3,42,000 बाकी आहेत."}},
         ]
         await db.module_videos.insert_one({
@@ -1010,16 +1955,19 @@ async def seed_data():
             "created_by": "system"
         })
 
-    # KB entries
     kb_seed = [
-        {"q": "Does Biziverse support GST?",
-         "a": {"en": "Yes — Biziverse handles GSTR1, GSTR3B, e-Invoice and e-Way Bill generation directly from sales invoices.",
+        {"q": "Does Biziverse support GSTR?",
+         "a": {"en": "Yes — Biziverse handles GSTR-1, GSTR3B, e-Invoice and e-Way Bill generation directly from sales invoices.",
                "hi": "हां — Biziverse GSTR1, GSTR3B, e-Invoice और e-Way Bill सीधे बिक्री चालान से बनाता है।"},
-         "tags": ["gst", "invoice", "compliance"]},
+         "tags": ["gst", "gstr", "invoice", "compliance"]},
         {"q": "I already use Tally — why switch?",
          "a": {"en": "Biziverse is a complete business platform — CRM, Sales, Inventory, Manufacturing — all in one. Tally is accounting only. You can also export data to Tally.",
                "hi": "Biziverse एक पूर्ण व्यापार प्लेटफ़ॉर्म है — CRM, बिक्री, इन्वेंटरी, मैन्युफैक्चरिंग — सब एक जगह।"},
          "tags": ["tally", "comparison", "switch"]},
+        {"q": "Can I use Biziverse and Tally together?",
+         "a": {"en": "Yes — some businesses use Biziverse for billing and operations and export data to Tally for their accountant's use. Both can run in parallel.",
+               "hi": "हां — कुछ व्यापारी Biziverse से billing करते हैं और Tally में data export करते हैं। दोनों साथ चल सकते हैं।"},
+         "tags": ["tally", "integration", "parallel", "export"]},
         {"q": "How do I track pending payments?",
          "a": {"en": "Use the Recovery module — it shows customer-wise pending amounts with auto reminders via WhatsApp & SMS.",
                "hi": "Recovery मॉड्यूल का उपयोग करें — यह WhatsApp और SMS के साथ ग्राहक-वार बकाया दिखाता है।"},
@@ -1037,6 +1985,7 @@ async def seed_data():
             "created_at": datetime.now(timezone.utc).isoformat()
         })
 
+    invalidate_kb_cache()
     return {"ok": True, "seeded_videos": len(seed_videos), "seeded_kb": len(kb_seed)}
 
 # ========== Health ==========
@@ -1058,13 +2007,32 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     init_storage()
-    # Auto-seed
     try:
         existing = await db.module_videos.count_documents({})
         if existing == 0:
             await seed_data()
     except Exception as e:
         logger.error(f"Auto-seed failed: {e}")
+    # Seed / refresh the fixed admin account from env vars (Shubham777 / 7777 by default)
+    try:
+        admin_uid = os.environ.get("ADMIN_USERNAME") or "Shubham777"
+        admin_pwd = os.environ.get("ADMIN_PASSWORD") or "7777"
+        admin_email = os.environ.get("ADMIN_EMAIL") or f"{admin_uid.lower()}@biziverse.local"
+        pwd_hash = hash_password(admin_pwd)
+        await db.users.update_one(
+            {"user_id": admin_uid},
+            {"$set": {
+                "user_id": admin_uid,
+                "email": admin_email,
+                "name": admin_uid,
+                "role": "admin",
+                "password_hash": pwd_hash,
+            }, "$setOnInsert": {"created_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+        logger.info(f"Admin account ready: {admin_uid}")
+    except Exception as e:
+        logger.error(f"Admin seed failed: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_db():
