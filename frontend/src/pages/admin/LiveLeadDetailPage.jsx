@@ -27,13 +27,26 @@ export default function LiveLeadDetailPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  useEffect(() => { scrollToBottom(); }, [messages, userTyping]);
+  const prevMsgCountRef = useRef(0);
+
+  // Only scroll when message COUNT increases (not on every re-render from polling)
+  useEffect(() => {
+    if (messages.length > prevMsgCountRef.current) {
+      scrollToBottom();
+      prevMsgCountRef.current = messages.length;
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    if (userTyping) scrollToBottom();
+  }, [userTyping]);
 
   const mergeMessages = useCallback((incoming) => {
     setMessages(prev => {
       const confirmed = prev.filter(m => !m._pending);
       const existingIds = new Set(confirmed.map(m => m.id));
       const newMsgs = incoming.filter(m => !existingIds.has(m.id));
+      if (newMsgs.length === 0) return prev; // no change — prevent re-render + scroll
       const merged = [...confirmed, ...newMsgs].sort(
         (a, b) => new Date(a.created_at) - new Date(b.created_at)
       );
@@ -163,6 +176,17 @@ export default function LiveLeadDetailPage() {
     sendTypingSignal();
   };
 
+  const endChat = async () => {
+    if (!window.confirm("End this chat session? The user will be notified.")) return;
+    try {
+      await api.put(`/admin/live-leads/${id}`, { status: "closed" });
+      toast.success("Session ended");
+      nav("/admin/live-leads");
+    } catch (e) {
+      toast.error("Could not end session");
+    }
+  };
+
   const togglePresence = async () => {
     const newVal = !agentOnline;
     setAgentOnline(newVal);
@@ -244,7 +268,7 @@ export default function LiveLeadDetailPage() {
           </div>
         </div>
 
-        {/* WS indicator + Online toggle */}
+        {/* WS indicator + Online toggle + End Chat */}
         <div className="flex items-center gap-2 flex-shrink-0">
           {wsConnected
             ? <Wifi className="h-3.5 w-3.5 text-emerald-400" title="Live connection" />
@@ -261,6 +285,13 @@ export default function LiveLeadDetailPage() {
           >
             <span className={`h-1.5 w-1.5 rounded-full ${agentOnline ? "bg-emerald-400 animate-pulse" : "bg-slate-500"}`} />
             {agentOnline ? "Online" : "Offline"}
+          </button>
+          <button
+            data-testid="end-chat-btn"
+            onClick={endChat}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 transition-all"
+          >
+            End Chat
           </button>
         </div>
       </div>

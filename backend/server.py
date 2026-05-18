@@ -952,17 +952,36 @@ async def ai_chat(payload: ChatIn):
 
 async def _log_and_fallback(payload: ChatIn, q: str, ai_config: Dict[str, Any]):
     """Log unanswered question for admin review and return executive CTA."""
-    await db.unanswered_questions.insert_one({
-        "id": f"uq_{uuid.uuid4().hex[:10]}",
-        "session_id": payload.session_id,
-        "question": q,
-        "language": payload.language,
-        "business_type": payload.business_type,
-        "product_category": payload.product_category,
-        "modules": payload.modules or [],
-        "resolved": False,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
+    # Don't log if an agent is already handling this session (human takeover questions)
+    if payload.session_id:
+        active_lead = await db.live_leads.find_one({
+            "session_id": payload.session_id,
+            "status": {"$in": ["active", "in_session", "assigned"]}
+        })
+        if not active_lead:
+            await db.unanswered_questions.insert_one({
+                "id": f"uq_{uuid.uuid4().hex[:10]}",
+                "session_id": payload.session_id,
+                "question": q,
+                "language": payload.language,
+                "business_type": payload.business_type,
+                "product_category": payload.product_category,
+                "modules": payload.modules or [],
+                "resolved": False,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+    else:
+        await db.unanswered_questions.insert_one({
+            "id": f"uq_{uuid.uuid4().hex[:10]}",
+            "session_id": payload.session_id,
+            "question": q,
+            "language": payload.language,
+            "business_type": payload.business_type,
+            "product_category": payload.product_category,
+            "modules": payload.modules or [],
+            "resolved": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
     fallback = ai_config.get("fallback_response", {})
     return {
         "answer": fallback.get(payload.language, DEFAULT_AI_SETTINGS["fallback_response"]["en"]),
@@ -1383,7 +1402,30 @@ async def update_live_lead(lead_id: str, payload: LiveLeadUpdateIn, user=Depends
     if update_doc:
         update_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
         await db.live_leads.update_one({"id": lead_id}, {"$set": update_doc})
+
+    # When closing: auto-resolve unanswered questions + notify user via WS
+    if payload.status in ("closed", "resolved", "completed"):
+        lead = await db.live_leads.find_one({"id": lead_id}, {"_id": 0})
+        if lead and lead.get("session_id"):
+            await db.unanswered_questions.update_many(
+                {"session_id": lead["session_id"], "resolved": False},
+                {"$set": {"resolved": True, "resolved_at": datetime.now(timezone.utc).isoformat(), "resolved_by": "agent_closed"}}
+            )
+            await ws_manager.broadcast(f"session:{lead['session_id']}", {
+                "type": "agent_left",
+                "message": "Support session ended."
+            })
+
     return await db.live_leads.find_one({"id": lead_id}, {"_id": 0})
+
+@api.delete("/admin/live-leads/bulk")
+async def bulk_delete_live_leads(payload: Dict[str, Any], user=Depends(admin_dep)):
+    """Bulk delete history leads by IDs."""
+    ids = payload.get("ids", [])
+    if not ids:
+        raise HTTPException(400, "No IDs provided")
+    await db.live_leads.delete_many({"id": {"$in": ids}})
+    return {"deleted": len(ids)}
 
 @api.post("/auth/login")
 async def auth_login(payload: AuthLoginIn, response: Response):

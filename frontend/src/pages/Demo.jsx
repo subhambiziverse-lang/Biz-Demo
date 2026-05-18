@@ -288,6 +288,11 @@ export default function Demo() {
             setAgentTyping(true);
             setTimeout(() => setAgentTyping(false), 2000);
           }
+          if (data.type === 'agent_left') {
+            setAgentLive(false);
+            setActiveLeadId(null);
+            setChat(c => [...c, { _id: `sys_end_${Date.now()}`, role: 'system', text: 'Support session ended. You can continue with our AI assistant.' }]);
+          }
         } catch (e) {}
       };
       ws.onclose = () => {};
@@ -315,6 +320,28 @@ export default function Demo() {
     };
     poll();
     const iv = setInterval(poll, 2000);
+    return () => clearInterval(iv);
+  }, [agentLive, activeLeadId]);
+
+  // Monitor lead status — reset agentLive when agent closes the session
+  useEffect(() => {
+    if (!agentLive || !activeLeadId) return;
+    const checkStatus = async () => {
+      try {
+        const r = await api.get(`/live-leads/${activeLeadId}`);
+        const s = r.data?.status;
+        if (s === 'closed' || s === 'resolved' || s === 'completed') {
+          setAgentLive(false);
+          setActiveLeadId(null);
+          setChat(c => [...c, {
+            _id: `sys_end_${Date.now()}`,
+            role: 'system',
+            text: 'Support session ended. You can continue with our AI assistant.'
+          }]);
+        }
+      } catch (e) {}
+    };
+    const iv = setInterval(checkStatus, 8000);
     return () => clearInterval(iv);
   }, [agentLive, activeLeadId]);
 
@@ -1335,7 +1362,7 @@ function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, on
                 : "bg-slate-100 text-slate-800 rounded-tl-sm"
             }`}>
               <div className="leading-relaxed">{m.text}</div>
-              {m.exec_cta && (
+              {m.exec_cta && !m.clarify && (
                 <div className="flex gap-2 mt-2">
                   <Button data-testid="exec-cta" size="sm" onClick={openExec} className="bg-secondary hover:bg-secondary/90 text-white rounded-full text-xs h-8">
                     Talk with executive
