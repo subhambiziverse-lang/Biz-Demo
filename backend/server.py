@@ -1234,8 +1234,20 @@ async def get_live_lead(lead_id: str):
 
 @api.get("/live-leads/session/{session_id}")
 async def get_live_lead_by_session(session_id: str):
-    """Return the live lead for a given demo `session_id` if one exists."""
-    lead = await db.live_leads.find_one({"session_id": session_id}, {"_id": 0})
+    """Return the most recent active live lead for a given demo session_id."""
+    # Prefer active/in_session over pending; return latest if multiple
+    lead = await db.live_leads.find_one(
+        {"session_id": session_id, "status": {"$in": ["active", "in_session", "assigned"]}},
+        {"_id": 0},
+        sort=[("created_at", -1)]
+    )
+    if not lead:
+        # Fall back to most recent pending lead
+        lead = await db.live_leads.find_one(
+            {"session_id": session_id},
+            {"_id": 0},
+            sort=[("created_at", -1)]
+        )
     if not lead:
         raise HTTPException(404, "Live lead not found for session")
     return lead

@@ -240,7 +240,6 @@ export default function Demo() {
   const [pendingMini, setPendingMini] = useState(null);
   const [agentTyping, setAgentTyping] = useState(false);
   const [activeLeadId, setActiveLeadId] = useState(null);
-  const agentJoinedAtRef = useRef(null); // track when agent joined so we only show new messages
 
   // Track questions for CRM
   const [questionsAsked, setQuestionsAsked] = useState([]);
@@ -275,7 +274,6 @@ export default function Demo() {
           if (data.type === 'agent_joined') {
             setAgentLive(true);
             if (data.lead?.id) setActiveLeadId(data.lead.id);
-            agentJoinedAtRef.current = new Date().toISOString();
             setChat(c => [...c, { _id: `sys_${Date.now()}`, role: 'system', text: `Agent ${data.agent?.name || 'Support'} joined the chat.` }]);
           }
           // Only process agent messages — user messages are added optimistically
@@ -298,17 +296,13 @@ export default function Demo() {
     return () => { if (wsRef.current) { try { wsRef.current.close(); } catch (e) {} } };
   }, [sessionId]);
 
-  // Polling fallback for agent messages when live — catches missed WS events
+  // Poll agent messages every 2s — simple ID dedup, no time filtering
   useEffect(() => {
     if (!agentLive || !activeLeadId) return;
     const poll = async () => {
       try {
         const r = await api.get(`/live-leads/${activeLeadId}/messages`);
-        const joinedAt = agentJoinedAtRef.current;
-        const agentMsgs = (r.data || []).filter(m =>
-          m.role === 'agent' &&
-          (!joinedAt || new Date(m.created_at) >= new Date(joinedAt))
-        );
+        const agentMsgs = (r.data || []).filter(m => m.role === 'agent');
         setChat(c => {
           const existingIds = new Set(c.map(m => m._id).filter(Boolean));
           const newMsgs = agentMsgs
@@ -320,11 +314,11 @@ export default function Demo() {
       } catch (e) {}
     };
     poll();
-    const iv = setInterval(poll, 3000); // 3s for snappier response
+    const iv = setInterval(poll, 2000);
     return () => clearInterval(iv);
   }, [agentLive, activeLeadId]);
 
-  // REST fallback in case WS missed agent_joined (page refresh, reconnect etc.)
+  // REST fallback — detect agent joining every 5s in case WS missed it
   useEffect(() => {
     if (agentLive || !sessionId) return;
     const checkForAgent = async () => {
@@ -332,7 +326,6 @@ export default function Demo() {
         const r = await api.get(`/live-leads/session/${sessionId}`);
         const s = r.data?.status;
         if ((s === 'active' || s === 'in_session' || s === 'assigned') && r.data?.id) {
-          if (!agentJoinedAtRef.current) agentJoinedAtRef.current = new Date().toISOString();
           setAgentLive(true);
           setActiveLeadId(r.data.id);
         }
