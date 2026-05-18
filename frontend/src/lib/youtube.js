@@ -27,3 +27,24 @@ export function extractYouTubeId(url) {
 }
 
 export function isYouTube(url) { return !!extractYouTubeId(url); }
+
+// ── Google Drive video support ────────────────────────────────────────────────
+// Accepts URLs like:
+//   https://drive.google.com/file/d/<ID>/view?usp=sharing
+//   https://drive.google.com/open?id=<ID>
+//   https://drive.google.com/uc?id=<ID>
+export function extractDriveId(url) {
+  if (!url) return null;
+  const m1 = url.match(/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]{10,})/);
+  if (m1) return m1[1];
+  const m2 = url.match(/[?&](?:id|export)=([A-Za-z0-9_-]{10,})/);
+  if (m2 && /drive\.google\.com/.test(url)) return m2[1];
+  return null;
+}
+
+export function isGoogleDrive(url) { return !!extractDriveId(url); }
+
+export function getDriveEmbedUrl(url) {
+  const id = extractDriveId(url);
+  return id ? `https://drive.google.com/file/d/${id}/preview` : null;
+}

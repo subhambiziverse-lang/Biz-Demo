@@ -54,14 +54,17 @@ export default function LiveLeadsPage() {
 
   const counts = useMemo(() => {
     const c = { live: 0, queue: 0, history: 0 };
+    const unread = { live: 0, queue: 0, history: 0 };
     for (const l of leads) {
       const s = (l.status || "pending").toLowerCase();
-      if (TABS[0].statuses.includes(s)) c.live++;
-      else if (TABS[1].statuses.includes(s)) c.queue++;
-      else if (TABS[2].statuses.includes(s)) c.history++;
-      else c.queue++;
+      let key = "queue";
+      if (TABS[0].statuses.includes(s)) key = "live";
+      else if (TABS[1].statuses.includes(s)) key = "queue";
+      else if (TABS[2].statuses.includes(s)) key = "history";
+      c[key] = (c[key] || 0) + 1;
+      unread[key] = (unread[key] || 0) + (l.unread_count || 0);
     }
-    return c;
+    return { counts: c, unread };
   }, [leads]);
 
   const filtered = useMemo(() => {
@@ -141,16 +144,27 @@ export default function LiveLeadsPage() {
         {TABS.map(t => {
           const Icon = t.icon;
           const active = t.key === tab;
+          const tCount = counts.counts[t.key] || 0;
+          const tUnread = counts.unread[t.key] || 0;
           return (
             <button
               key={t.key}
               data-testid={`tab-${t.key}`}
               onClick={() => setTab(t.key)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-colors ${active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"}`}
+              className={`relative flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-colors ${active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"}`}
             >
               <Icon className="h-4 w-4" />
               <span>{t.label}</span>
-              <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-mono ${active ? "bg-orange-100 text-orange-700" : "bg-slate-200 text-slate-500"}`}>{counts[t.key]}</span>
+              <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-mono ${active ? "bg-orange-100 text-orange-700" : "bg-slate-200 text-slate-500"}`}>{tCount}</span>
+              {t.key !== "history" && tUnread > 0 && (
+                <span
+                  data-testid={`tab-unread-${t.key}`}
+                  className="inline-flex items-center justify-center text-[10px] font-bold text-white bg-red-500 rounded-full min-w-[18px] h-[18px] px-1"
+                  title={`${tUnread} unread`}
+                >
+                  {tUnread > 99 ? "99+" : tUnread}
+                </span>
+              )}
             </button>
           );
         })}
@@ -214,6 +228,15 @@ export default function LiveLeadsPage() {
                     {lead.business_type && <span className="text-xs text-slate-500">· {lead.business_type}</span>}
                     {lead.product_category && <span className="text-xs text-slate-500">· {lead.product_category}</span>}
                     {lead.assigned_to && <span className="text-xs text-slate-500">· <span className="font-medium text-slate-700">{lead.assigned_to}</span></span>}
+                    {!!lead.unread_count && lead.unread_count > 0 && tab !== "history" && (
+                      <span
+                        data-testid={`unread-badge-${lead.id}`}
+                        className="ml-auto inline-flex items-center justify-center text-[11px] font-bold text-white bg-red-500 rounded-full min-w-[22px] h-[22px] px-1.5 animate-pulse"
+                        title={`${lead.unread_count} new message(s)`}
+                      >
+                        {lead.unread_count > 99 ? "99+" : lead.unread_count}
+                      </span>
+                    )}
                   </div>
                   <div className="grid gap-2 sm:grid-cols-2">
                     <div className="rounded-xl bg-slate-50 p-3">

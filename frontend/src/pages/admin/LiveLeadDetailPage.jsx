@@ -58,6 +58,8 @@ export default function LiveLeadDetailPage() {
     try {
       const res = await api.get(`/live-leads/${id}/messages`);
       mergeMessages(res.data || []);
+      // Mark this lead as read by the agent — clears unread badge in list
+      api.post(`/admin/live-leads/${id}/mark-read`).catch(() => {});
     } catch (e) {}
   }, [id, mergeMessages]);
 

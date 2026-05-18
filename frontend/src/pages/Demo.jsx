@@ -10,7 +10,8 @@ import {
   ArrowLeft, Maximize2, Minimize2, X, MessageCircle, Subtitles, UserCheck,
   ChevronLeft, ChevronRight
 } from "lucide-react";
-import { loadYouTubeAPI, extractYouTubeId, isYouTube } from "../lib/youtube";
+import { loadYouTubeAPI, extractYouTubeId, isYouTube, isGoogleDrive, getDriveEmbedUrl } from "../lib/youtube";
+import DateTimePicker from "../components/DateTimePicker";
 
 // ── Quality options for YouTube ───────────────────────────────────────────────
 const YT_QUALITIES = [
@@ -296,9 +297,7 @@ export default function Demo() {
   const [humanNow, setHumanNow]         = useState(false);
   const [crmLoading, setCrmLoading]     = useState(false);
   const [agentLive, setAgentLive]       = useState(false);
-  const [chatSize, setChatSize]         = useState("normal"); // kept for compatibility
   const [chatWidth, setChatWidth]       = useState(380);
-  const draggingRef = useRef(false);
   const wsRef = useRef(null);
 
   // Mini-demo state
@@ -316,6 +315,26 @@ export default function Demo() {
 
   // Track questions for CRM
   const [questionsAsked, setQuestionsAsked] = useState([]);
+
+  // AI assistant skin (loaded from /settings)
+  const [aiSkin, setAiSkin] = useState({
+    name: "Biziverse AI",
+    avatar_url: "",
+    primary_color: "#f97316",
+    secondary_color: "#0f172a",
+  });
+
+  useEffect(() => {
+    api.get("/settings").then(r => {
+      const a = (r.data && r.data.ai_settings) || {};
+      setAiSkin({
+        name: a.name || "Biziverse AI",
+        avatar_url: a.avatar_url || "",
+        primary_color: a.primary_color || "#f97316",
+        secondary_color: a.secondary_color || "#0f172a",
+      });
+    }).catch(() => {});
+  }, []);
 
   const videoRef        = useRef(null);
   const ytPlayerRef     = useRef(null);
@@ -476,6 +495,8 @@ export default function Demo() {
   }, [activeChapterIdx]);
 
   const isYT          = isYouTube(currentVideo?.video_url || "");
+  const isDrive       = !isYT && isGoogleDrive(currentVideo?.video_url || "");
+  const driveEmbed    = isDrive ? getDriveEmbedUrl(currentVideo?.video_url || "") : null;
   const currentMarker = markerIdx >= 0 ? markers[markerIdx] : null;
   const activeMarker  = currentMarker && (currentMarker.end_time == null || progress <= currentMarker.end_time + 0.2)
     ? currentMarker : null;
@@ -761,13 +782,14 @@ export default function Demo() {
     })();
   }, [agentLive, activeLeadId, sessionId]);
 
-  const sendChat = async () => {
-    if (!chatInput.trim()) return;
-    const q = chatInput.trim();
+  const sendChat = async (overrideText) => {
+    const raw = (overrideText !== undefined ? overrideText : chatInput) || "";
+    if (!raw.trim()) return;
+    const q = raw.trim();
     setQuestionsAsked(prev => [...new Set([...prev, q])]);
     const tempId = `user_${Date.now()}`;
     setChat(c => [...c, { _id: tempId, role: "user", text: q }]);
-    setChatInput("");
+    if (overrideText === undefined) setChatInput("");
 
     // If a human agent is live on this session, route ONLY to agent — never to AI
     if (agentLive) {
@@ -801,9 +823,11 @@ export default function Demo() {
       const noAnswer   = r.data.no_answer;
       const clarify    = r.data.clarify;
       const candidates = r.data.candidates || [];
+      const followups  = Array.isArray(r.data.followups) ? r.data.followups : [];
       const msg = { role: "ai", text: ans };
       if (noAnswer) msg.exec_cta = true;
       if (clarify && candidates.length) { msg.clarify = true; msg.candidates = candidates; }
+      if (followups.length && !clarify && !noAnswer) msg.followups = followups;
       setChat(c => [...c, msg]);
       if (videoUrl) {
         setPendingMini({ video_url: videoUrl, topic: q, start: r.data.video_start, end: r.data.video_end });
@@ -984,6 +1008,15 @@ export default function Demo() {
                   className="bg-white"
                 />
               </div>
+            ) : isDrive && driveEmbed ? (
+              <iframe
+                data-testid="drive-video"
+                src={driveEmbed}
+                title={currentVideo?.title || "Drive video"}
+                allow="autoplay; encrypted-media; fullscreen"
+                allowFullScreen
+                className="absolute inset-0 w-full h-full border-0"
+              />
             ) : !isYT && currentVideo && (
               <video
                 ref={videoRef}
@@ -1074,8 +1107,8 @@ export default function Demo() {
               </div>
             )}
 
-            {/* ── Controls bar ── */}
-            {!tryYourselfMode && currentVideo && (
+            {/* ── Controls bar (hidden for Drive iframe — uses its own controls) ── */}
+            {!tryYourselfMode && currentVideo && !isDrive && (
               <ControlsBar
                 progress={progress}
                 duration={duration}
@@ -1159,30 +1192,69 @@ export default function Demo() {
         {/* ── AI Chat sidebar (desktop) / floating drawer (mobile + maximized) ── */}
         {!maximized && (
           <aside
-            className="hidden lg:flex lg:col-span-4 bg-white border border-slate-200 rounded-2xl flex-col h-[calc(100vh-100px)] sticky top-[72px] overflow-hidden"
-            style={{ width: chatWidth, minWidth: 260, maxWidth: 900 }}
+            className="hidden lg:flex lg:col-span-4 bg-white border border-slate-200 rounded-2xl flex-col h-[calc(100vh-100px)] sticky top-[72px] overflow-hidden relative"
+            style={{ width: chatWidth, minWidth: 280, maxWidth: 900 }}
             data-testid="chat-sidebar-desktop"
           >
-            <div className="relative">
-              <div style={{ position: 'absolute', left: -8, top: 0, bottom: 0, width: 16, cursor: 'ew-resize' }}
-                   onMouseDown={(e) => { draggingRef.current = true; e.preventDefault(); }}
-                   onDoubleClick={() => setChatWidth(380)}
-                   onMouseUp={() => { draggingRef.current = false; }}
-                   onMouseMove={(e) => {
-                     if (!draggingRef.current) return;
-                     const rect = e.currentTarget.parentElement.getBoundingClientRect();
-                     const newW = window.innerWidth - e.clientX - 32;
-                     if (newW >= 260 && newW <= 900) setChatWidth(newW);
-                   }}
-              />
+            {/* Drag handle — full-height left edge with document-level smooth drag */}
+            <div
+              data-testid="chat-resize-handle"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                const startX = e.clientX;
+                const startW = chatWidth;
+                document.body.style.cursor = "ew-resize";
+                document.body.style.userSelect = "none";
+                const onMove = (ev) => {
+                  const dx = startX - ev.clientX; // drag left = bigger
+                  const newW = Math.min(900, Math.max(280, startW + dx));
+                  setChatWidth(newW);
+                };
+                const onUp = () => {
+                  document.removeEventListener("mousemove", onMove);
+                  document.removeEventListener("mouseup", onUp);
+                  document.body.style.cursor = "";
+                  document.body.style.userSelect = "";
+                };
+                document.addEventListener("mousemove", onMove);
+                document.addEventListener("mouseup", onUp);
+              }}
+              onTouchStart={(e) => {
+                if (!e.touches[0]) return;
+                const startX = e.touches[0].clientX;
+                const startW = chatWidth;
+                const onMove = (ev) => {
+                  const t = ev.touches[0];
+                  if (!t) return;
+                  const dx = startX - t.clientX;
+                  setChatWidth(Math.min(900, Math.max(280, startW + dx)));
+                };
+                const onEnd = () => {
+                  document.removeEventListener("touchmove", onMove);
+                  document.removeEventListener("touchend", onEnd);
+                };
+                document.addEventListener("touchmove", onMove, { passive: true });
+                document.addEventListener("touchend", onEnd);
+              }}
+              onDoubleClick={() => setChatWidth(380)}
+              title="Drag to resize · Double-click to reset"
+              aria-label="Resize chat"
+              role="separator"
+              style={{ touchAction: "none" }}
+              className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize z-20 group"
+            >
+              <div className="h-full w-1 mx-auto bg-transparent group-hover:bg-orange-200 transition-colors" />
+              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-12 w-1 rounded-full bg-slate-200 group-hover:bg-orange-500 transition-colors" />
             </div>
-            <ChatHeader lang={lang} agentLive={agentLive} setChatOpen={setChatOpen} />
+            <ChatHeader aiSkin={aiSkin} agentLive={agentLive} setChatOpen={setChatOpen} />
             <ChatBody
               chat={chat} chatLoading={chatLoading} chatEndRef={chatEndRef} lang={lang}
-              onAccept={acceptShowMe} onDecline={declineShowMe} onClarifyPick={pickClarifyCandidate}
+              aiSkin={aiSkin}
+              onAccept={acceptShowMe} onDecline={declineShowMe}
+              onClarifyPick={pickClarifyCandidate} onFollowup={(q) => sendChat(q)}
               agentTyping={agentTyping}
             />
-            <ChatInput lang={lang} chatInput={chatInput} setChatInput={setChatInput} send={sendChat} wsRef={wsRef} />
+            <ChatInput lang={lang} chatInput={chatInput} setChatInput={setChatInput} send={sendChat} wsRef={wsRef} aiSkin={aiSkin} />
           </aside>
         )}
 
@@ -1196,15 +1268,10 @@ export default function Demo() {
             data-testid="chat-drawer-mobile"
           >
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3 flex-shrink-0">
-              <div className="flex items-center gap-2">
-                <div className={`h-8 w-8 rounded-full grid place-items-center ${agentLive ? 'bg-emerald-100' : 'bg-orange-100'}`}>
-                  {agentLive
-                    ? <UserCheck className="h-4 w-4 text-emerald-600" />
-                    : <Sparkles className="h-4 w-4 text-orange-600" />
-                  }
-                </div>
-                <div>
-                  <div className="font-display font-bold text-secondary text-sm">{agentLive ? 'Live Support' : 'Biziverse AI'}</div>
+              <div className="flex items-center gap-2 min-w-0">
+                <AvatarChip aiSkin={aiSkin} agentLive={agentLive} size="md" />
+                <div className="min-w-0">
+                  <div className="font-display font-bold text-secondary text-sm truncate">{agentLive ? 'Live Support' : aiSkin.name}</div>
                   <div className={`text-[11px] flex items-center gap-1.5 ${agentLive ? 'text-emerald-600' : 'text-slate-500'}`}>
                     <span className={`h-1.5 w-1.5 rounded-full ${agentLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
                     {agentLive ? 'Agent is online' : 'AI assistant'}
@@ -1217,16 +1284,19 @@ export default function Demo() {
             </div>
             <ChatBody
               chat={chat} chatLoading={chatLoading} chatEndRef={chatEndRef} lang={lang}
-              onAccept={acceptShowMe} onDecline={declineShowMe} onClarifyPick={pickClarifyCandidate}
+              aiSkin={aiSkin}
+              onAccept={acceptShowMe} onDecline={declineShowMe}
+              onClarifyPick={pickClarifyCandidate} onFollowup={(q) => sendChat(q)}
               agentTyping={agentTyping}
             />
-            <ChatInput lang={lang} chatInput={chatInput} setChatInput={setChatInput} send={sendChat} wsRef={wsRef} />
+            <ChatInput lang={lang} chatInput={chatInput} setChatInput={setChatInput} send={sendChat} wsRef={wsRef} aiSkin={aiSkin} />
           </div>
         ) : (
           <button
             data-testid="open-chat-bubble"
             onClick={() => setChatOpen(true)}
-            className={`fixed bottom-5 right-5 h-14 w-14 rounded-full bg-orange-600 hover:bg-orange-700 text-white shadow-2xl shadow-orange-500/40 grid place-items-center z-50 ${maximized ? "" : "lg:hidden"}`}
+            style={{ backgroundColor: aiSkin.primary_color }}
+            className={`fixed bottom-5 right-5 h-14 w-14 rounded-full text-white shadow-2xl grid place-items-center z-50 hover:opacity-90 transition-opacity ${maximized ? "" : "lg:hidden"}`}
           >
             <MessageCircle className="h-6 w-6" />
           </button>
@@ -1323,12 +1393,16 @@ export default function Demo() {
                   />
                 </div>
                 <label className="block mt-4 text-xs uppercase tracking-widest text-slate-500 font-bold">Preferred call-back time</label>
-                <input
-                  data-testid="cb-time" type="datetime-local" value={callbackTime}
-                  min={(() => { const d = new Date(Date.now() + 11 * 60 * 1000); d.setSeconds(0); return d.toISOString().slice(0, 16); })()}
-                  onChange={e => setCallbackTime(e.target.value)}
-                  className="mt-2 w-full border-2 border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:border-orange-500"
-                />
+                <div className="mt-2">
+                  <DateTimePicker
+                    value={callbackTime}
+                    onChange={setCallbackTime}
+                    minOffsetMinutes={10}
+                    stepMinutes={15}
+                    placeholder="Pick date & time"
+                    testId="cb-time"
+                  />
+                </div>
                 <p className="text-xs text-slate-400 mt-1">Minimum 10 minutes from now.</p>
                 <div className="mt-4 rounded-3xl border border-slate-200 bg-slate-50 p-4">
                   <div className="text-xs uppercase tracking-widest text-slate-500 font-bold mb-3">Do you want a human agent right away?</div>
@@ -1400,18 +1474,42 @@ function fmtTime(s) {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
-function ChatHeader({ lang, agentLive, setChatOpen }) {
+function AvatarChip({ aiSkin, agentLive, size = "md" }) {
+  const px = size === "sm" ? "h-7 w-7" : size === "lg" ? "h-10 w-10" : "h-9 w-9";
+  if (agentLive) {
+    return (
+      <div className={`${px} rounded-full grid place-items-center bg-emerald-100 flex-shrink-0`}>
+        <UserCheck className="h-4 w-4 text-emerald-600" />
+      </div>
+    );
+  }
+  if (aiSkin?.avatar_url) {
+    return (
+      <img
+        src={aiSkin.avatar_url}
+        alt={aiSkin?.name || "AI"}
+        className={`${px} rounded-full object-cover border border-slate-200 flex-shrink-0 bg-white`}
+        onError={(e) => { e.currentTarget.style.display = "none"; }}
+      />
+    );
+  }
   return (
-    <div className="px-5 py-4 border-b border-slate-200 flex items-center gap-2 justify-between">
-      <div className="flex items-center gap-2">
-        <div className={`h-9 w-9 rounded-full grid place-items-center ${agentLive ? 'bg-emerald-100' : 'bg-orange-100'}`}>
-          {agentLive
-            ? <UserCheck className="h-4 w-4 text-emerald-600" />
-            : <Sparkles className="h-4 w-4 text-orange-600" />
-          }
-        </div>
-        <div>
-          <div className="font-display font-bold text-secondary">{agentLive ? 'Live Support' : 'Biziverse AI'}</div>
+    <div
+      className={`${px} rounded-full grid place-items-center flex-shrink-0`}
+      style={{ backgroundColor: (aiSkin?.primary_color || "#f97316") + "1f" }}
+    >
+      <Sparkles className="h-4 w-4" style={{ color: aiSkin?.primary_color || "#f97316" }} />
+    </div>
+  );
+}
+
+function ChatHeader({ aiSkin, agentLive, setChatOpen }) {
+  return (
+    <div className="px-5 py-4 border-b border-slate-200 flex items-center gap-2 justify-between flex-shrink-0">
+      <div className="flex items-center gap-2 min-w-0">
+        <AvatarChip aiSkin={aiSkin} agentLive={agentLive} />
+        <div className="min-w-0">
+          <div className="font-display font-bold text-secondary truncate">{agentLive ? 'Live Support' : (aiSkin?.name || 'Biziverse AI')}</div>
           <div className={`text-xs flex items-center gap-1.5 ${agentLive ? 'text-emerald-600' : 'text-slate-500'}`}>
             <span className={`h-1.5 w-1.5 rounded-full ${agentLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
             {agentLive ? 'Agent is online' : 'AI assistant'}
@@ -1425,17 +1523,17 @@ function ChatHeader({ lang, agentLive, setChatOpen }) {
   );
 }
 
-function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, onClarifyPick, agentTyping }) {
+function ChatBody({ chat, chatLoading, chatEndRef, lang, aiSkin, onAccept, onDecline, onClarifyPick, onFollowup, agentTyping }) {
   const openExec = () => window.dispatchEvent(new CustomEvent("biz-open-callback"));
+  const primary = aiSkin?.primary_color || "#f97316";
   return (
-    <div className="flex-1 overflow-y-auto thin-scroll px-4 py-4 space-y-2">
+    <div className="flex-1 overflow-y-auto thin-scroll px-4 py-4 space-y-2 min-h-0">
       {chat.length === 0 && (
         <div className="text-sm text-slate-500 bg-slate-50 rounded-xl p-3 border border-slate-200">
           Hi! Ask me anything about Biziverse — I'll answer from our knowledge base. Try <em>"Does this support GST?"</em>
         </div>
       )}
       {chat.map((m, i) => {
-        // System messages (agent joined notice)
         if (m.role === 'system') {
           return (
             <div key={m._id || i} className="flex justify-center my-2">
@@ -1443,17 +1541,17 @@ function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, on
             </div>
           );
         }
+        const isUser = m.role === "user";
         return (
-          <div
-            key={m._id || i}
-            className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
-          >
-            <div className={`text-sm max-w-[88%] rounded-2xl px-4 py-2.5 ${
-              m.role === "user"
-                ? "bg-orange-600 text-white rounded-tr-sm"
-                : "bg-slate-100 text-slate-800 rounded-tl-sm"
-            }`}>
+          <div key={m._id || i} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+            <div
+              className={`text-sm max-w-[88%] rounded-2xl px-4 py-2.5 ${
+                isUser ? "text-white rounded-tr-sm" : "bg-slate-100 text-slate-800 rounded-tl-sm"
+              }`}
+              style={isUser ? { backgroundColor: primary } : undefined}
+            >
               <div className="leading-relaxed whitespace-pre-wrap break-words">{m.text}</div>
+
               {m.exec_cta && !m.clarify && (
                 <div className="flex gap-2 mt-2">
                   <Button data-testid="exec-cta" size="sm" onClick={openExec} className="bg-secondary hover:bg-secondary/90 text-white rounded-full text-xs h-8">
@@ -1461,6 +1559,7 @@ function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, on
                   </Button>
                 </div>
               )}
+
               {m.clarify && m.candidates && m.candidates.length > 0 && (
                 <div className="flex flex-col gap-1.5 mt-2.5">
                   {m.candidates.map((c, idx) => (
@@ -1475,9 +1574,10 @@ function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, on
                   ))}
                 </div>
               )}
+
               {m.prompt === "show_me" && (
                 <div className="flex gap-2 mt-2">
-                  <Button data-testid="show-me-yes" size="sm" onClick={() => onAccept(m)} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full text-xs h-8">
+                  <Button data-testid="show-me-yes" size="sm" onClick={() => onAccept(m)} style={{ backgroundColor: primary }} className="hover:opacity-90 text-white rounded-full text-xs h-8">
                     Show me
                   </Button>
                   <Button data-testid="show-me-no" size="sm" variant="outline" onClick={onDecline} className="rounded-full text-xs h-8">
@@ -1485,8 +1585,26 @@ function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, on
                   </Button>
                 </div>
               )}
+
+              {/* AI follow-up question chips (under assistant message) */}
+              {!isUser && Array.isArray(m.followups) && m.followups.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-2.5" data-testid="ai-followups">
+                  {m.followups.slice(0, 3).map((q, idx) => (
+                    <button
+                      key={idx}
+                      data-testid={`followup-chip-${idx}`}
+                      onClick={() => onFollowup && onFollowup(q)}
+                      className="text-[11px] bg-white hover:bg-orange-50 border border-slate-200 hover:border-orange-300 text-secondary px-2.5 py-1 rounded-full transition-colors max-w-full truncate"
+                      title={q}
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              )}
+
               {m.created_at && (
-                <div className={`text-[10px] mt-1 ${m.role === 'user' ? 'text-white/50 text-right' : 'text-slate-400'}`}>
+                <div className={`text-[10px] mt-1 ${isUser ? 'text-white/60 text-right' : 'text-slate-400'}`}>
                   {new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </div>
               )}
@@ -1521,11 +1639,10 @@ function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, on
   );
 }
 
-function ChatInput({ lang, chatInput, setChatInput, send, wsRef }) {
+function ChatInput({ lang, chatInput, setChatInput, send, wsRef, aiSkin }) {
   const typingTimeout = useRef(null);
   const onKey = (e) => {
     if (e.key === "Enter") { send(); return; }
-    // send typing start via websocket
     if (wsRef && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       try { wsRef.current.send(JSON.stringify({ type: 'typing', payload: { status: 'start' } })); } catch (err) {}
       if (typingTimeout.current) clearTimeout(typingTimeout.current);
@@ -1535,7 +1652,7 @@ function ChatInput({ lang, chatInput, setChatInput, send, wsRef }) {
     }
   };
   return (
-    <div className="px-5 py-4 border-t border-slate-200">
+    <div className="px-5 py-4 border-t border-slate-200 flex-shrink-0">
       <div className="flex gap-2">
         <input
           data-testid="chat-input"
@@ -1543,9 +1660,15 @@ function ChatInput({ lang, chatInput, setChatInput, send, wsRef }) {
           onChange={e => setChatInput(e.target.value)}
           onKeyDown={onKey}
           placeholder={t(lang, "ask_anything")}
-          className="flex-1 border border-slate-200 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+          className="flex-1 border border-slate-200 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2"
+          style={{ "--tw-ring-color": aiSkin?.primary_color || "#f97316" }}
         />
-        <Button data-testid="chat-send" onClick={send} className="bg-orange-600 hover:bg-orange-700 text-white rounded-full h-10 w-10 p-0">
+        <Button
+          data-testid="chat-send"
+          onClick={() => send()}
+          style={{ backgroundColor: aiSkin?.primary_color || "#f97316" }}
+          className="hover:opacity-90 text-white rounded-full h-10 w-10 p-0"
+        >
           <Send className="h-4 w-4" />
         </Button>
       </div>

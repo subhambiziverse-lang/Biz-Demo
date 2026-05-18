@@ -801,6 +801,12 @@ async def llm_match_and_answer(
         "  - STRICTLY stay within KB facts. Do NOT invent features, prices, or capabilities.\n"
         "  - HARD LIMIT: 60 words for prose, 50 words total for bullet format.\n\n"
 
+        "STEP 4 — FOLLOW-UP QUESTIONS (always, for status='match' only):\n"
+        f"  - Suggest 3 short follow-up questions a curious user might ask next, in {lang_name}.\n"
+        "  - Each ≤ 6 words, ending with '?'. Phrased from the user's POV ('Can I export to PDF?').\n"
+        "  - Make them topically adjacent to the question they just asked.\n"
+        "  - Avoid duplicating the original question and avoid CTAs.\n\n"
+
         "Output ONLY a JSON object. No prose, no code fences."
     )
 
@@ -812,7 +818,8 @@ async def llm_match_and_answer(
         '"kb_id": "<matched entry id or empty>", '
         '"answer": "<clear well-structured answer in user language, or empty>", '
         '"candidate_ids": ["<id1>", "<id2>", "<id3>"], '
-        '"clarify_question": "<clarifying question or empty>"}'
+        '"clarify_question": "<clarifying question or empty>", '
+        '"followups": ["<short Q1>", "<short Q2>", "<short Q3>"]}'
     )
 
     try:
@@ -903,6 +910,11 @@ async def ai_chat(payload: ChatIn):
             if not answer:
                 answer = ((e.get("answers") or {}).get(payload.language)
                           or (e.get("answers") or {}).get("en", ""))
+            followups = [
+                str(f).strip()
+                for f in (result.get("followups") or [])
+                if isinstance(f, str) and f.strip()
+            ][:3]
             return {
                 "answer": answer,
                 "from_kb": True,
@@ -912,6 +924,7 @@ async def ai_chat(payload: ChatIn):
                 "video_url": e.get("video_url"),
                 "video_start": e.get("video_start"),
                 "video_end": e.get("video_end"),
+                "followups": followups,
             }
 
     # ── Case 2: Ambiguous — show real KB questions as options ──
@@ -1283,7 +1296,31 @@ async def get_live_lead_by_session(session_id: str):
 @api.get("/admin/live-leads")
 async def admin_list_live_leads(user=Depends(admin_dep)):
     items = await db.live_leads.find({}, {"_id": 0}).sort([("status", 1), ("created_at", -1)]).to_list(500)
+
+    # Augment each lead with `unread_count` = user messages newer than `agent_last_seen_at`
+    for lead in items:
+        last_seen = lead.get("agent_last_seen_at")
+        query = {"live_lead_id": lead.get("id"), "role": "user"}
+        if last_seen:
+            query["created_at"] = {"$gt": last_seen}
+        try:
+            count = await db.live_lead_messages.count_documents(query)
+        except Exception:
+            count = 0
+        lead["unread_count"] = int(count)
     return items
+
+
+@api.post("/admin/live-leads/{lead_id}/mark-read")
+async def mark_lead_read(lead_id: str, user=Depends(admin_dep)):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    res = await db.live_leads.update_one(
+        {"id": lead_id},
+        {"$set": {"agent_last_seen_at": now_iso}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "Live lead not found")
+    return {"ok": True, "agent_last_seen_at": now_iso}
 
 @api.post("/admin/live-leads/{lead_id}/assign")
 async def assign_live_lead(lead_id: str, user=Depends(admin_dep)):
