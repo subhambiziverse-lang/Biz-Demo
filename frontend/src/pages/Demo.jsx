@@ -7,7 +7,8 @@ import { voice } from "../lib/voice";
 import api from "../lib/api";
 import {
   Pause, Play, ExternalLink, Volume2, VolumeX, Send, Sparkles,
-  ArrowLeft, Maximize2, Minimize2, X, MessageCircle, Subtitles, UserCheck
+  ArrowLeft, Maximize2, Minimize2, X, MessageCircle, Subtitles, UserCheck,
+  ChevronLeft, ChevronRight
 } from "lucide-react";
 import { loadYouTubeAPI, extractYouTubeId, isYouTube } from "../lib/youtube";
 
@@ -192,6 +193,78 @@ function ControlsBar({
           )}
 
         </div>
+      </div>
+    </div>
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Horizontal strip with left/right arrow scrollers ──────────────────────────
+function ScrollStrip({ innerRef, children, testIdPrefix = "strip" }) {
+  const fallbackRef = useRef(null);
+  const ref = innerRef || fallbackRef;
+  const [canLeft, setCanLeft] = useState(false);
+  const [canRight, setCanRight] = useState(false);
+
+  const update = () => {
+    const el = ref.current;
+    if (!el) return;
+    setCanLeft(el.scrollLeft > 4);
+    setCanRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
+  };
+
+  useEffect(() => {
+    update();
+    const el = ref.current;
+    if (!el) return;
+    el.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    return () => {
+      el.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
+    // eslint-disable-next-line
+  }, []);
+
+  // Re-check when children change
+  useEffect(() => { update(); /* eslint-disable-next-line */ }, [children]);
+
+  const scrollBy = (dir) => {
+    const el = ref.current;
+    if (!el) return;
+    el.scrollBy({ left: dir * Math.max(160, el.clientWidth * 0.6), behavior: "smooth" });
+  };
+
+  return (
+    <div className="relative">
+      {canLeft && (
+        <button
+          type="button"
+          data-testid={`${testIdPrefix}-arrow-left`}
+          onClick={() => scrollBy(-1)}
+          aria-label="Scroll left"
+          className="absolute left-0 top-1/2 -translate-y-1/2 z-10 h-8 w-8 rounded-full bg-white shadow-md border border-slate-200 grid place-items-center text-slate-600 hover:text-orange-600 hover:border-orange-300 transition-colors"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </button>
+      )}
+      {canRight && (
+        <button
+          type="button"
+          data-testid={`${testIdPrefix}-arrow-right`}
+          onClick={() => scrollBy(1)}
+          aria-label="Scroll right"
+          className="absolute right-0 top-1/2 -translate-y-1/2 z-10 h-8 w-8 rounded-full bg-white shadow-md border border-slate-200 grid place-items-center text-slate-600 hover:text-orange-600 hover:border-orange-300 transition-colors"
+        >
+          <ChevronRight className="h-4 w-4" />
+        </button>
+      )}
+      <div
+        ref={ref}
+        className="flex items-center gap-2 overflow-x-auto scroll-smooth no-scrollbar px-1"
+        style={{ scrollbarWidth: "none" }}
+      >
+        {children}
       </div>
     </div>
   );
@@ -849,15 +922,15 @@ export default function Demo() {
       {/* ── Top bar ── */}
       {!maximized && (
         <header className="bg-white border-b border-slate-200 sticky top-0 z-40">
-          <div className="max-w-[1600px] mx-auto px-4 lg:px-8 py-3 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <Button data-testid="demo-back" variant="ghost" size="sm" onClick={() => { voice.stop(); nav("/quiz"); }} className="text-slate-600">
-                <ArrowLeft className="h-4 w-4 mr-1" /> {t(lang, "back")}
+          <div className="max-w-[1600px] mx-auto px-3 sm:px-4 lg:px-8 py-2.5 sm:py-3 flex items-center justify-between gap-2 sm:gap-4">
+            <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+              <Button data-testid="demo-back" variant="ghost" size="sm" onClick={() => { voice.stop(); nav("/quiz"); }} className="text-slate-600 px-2 sm:px-3">
+                <ArrowLeft className="h-4 w-4 sm:mr-1" /> <span className="hidden sm:inline">{t(lang, "back")}</span>
               </Button>
-              <img src="https://biziverse.com/WebExt/img/logo2.jpg" alt="Biziverse" className="h-7 w-auto" />
-              <span className="text-xs uppercase tracking-widest text-orange-600 font-bold border-l pl-3">Live Demo</span>
+              <img src="https://biziverse.com/WebExt/img/logo2.jpg" alt="Biziverse" className="h-6 sm:h-7 w-auto" />
+              <span className="hidden sm:inline text-xs uppercase tracking-widest text-orange-600 font-bold border-l pl-3">Live Demo</span>
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap justify-end">
               <div className="hidden md:flex items-center text-xs text-slate-500 mr-2">
                 {currentVideo?.title}{inMiniDemo && " · Showing answer"}
               </div>
@@ -865,23 +938,24 @@ export default function Demo() {
                 data-testid="demo-lang-select"
                 value={lang}
                 onChange={e => setLang(e.target.value)}
-                className="text-sm border border-slate-200 rounded-full px-3 py-1.5 bg-white"
+                className="text-xs sm:text-sm border border-slate-200 rounded-full px-2 sm:px-3 py-1 sm:py-1.5 bg-white"
               >
                 {LANGS.map(l => <option key={l.code} value={l.code}>{l.native}</option>)}
               </select>
-              <Button data-testid="voice-toggle" variant="outline" size="sm" onClick={() => setVoiceOn(v => !v)}>
-                {voiceOn ? <Volume2 className="h-4 w-4 mr-1.5" /> : <VolumeX className="h-4 w-4 mr-1.5" />}
-                {voiceOn ? "Sound On" : "Muted"}
+              <Button data-testid="voice-toggle" variant="outline" size="sm" onClick={() => setVoiceOn(v => !v)} className="px-2 sm:px-3">
+                {voiceOn ? <Volume2 className="h-4 w-4 sm:mr-1.5" /> : <VolumeX className="h-4 w-4 sm:mr-1.5" />}
+                <span className="hidden sm:inline">{voiceOn ? "Sound On" : "Muted"}</span>
               </Button>
-              <Button data-testid="end-demo" variant="ghost" size="sm" onClick={() => { voice.stop(); setEndFlow("choose"); }}>
-                End demo
+              <Button data-testid="end-demo" variant="ghost" size="sm" onClick={() => { voice.stop(); setEndFlow("choose"); }} className="px-2 sm:px-3 text-xs sm:text-sm">
+                <span className="hidden sm:inline">End demo</span>
+                <span className="sm:hidden">End</span>
               </Button>
             </div>
           </div>
         </header>
       )}
 
-      <main className={maximized ? "h-screen w-screen relative" : "max-w-[1600px] mx-auto px-4 lg:px-8 py-6 grid lg:grid-cols-12 gap-6"}>
+      <main className={maximized ? "h-screen w-screen relative" : "max-w-[1600px] mx-auto px-3 sm:px-4 lg:px-8 py-4 lg:py-6 grid lg:grid-cols-12 gap-4 lg:gap-6"}>
 
         {/* ── Video column ── */}
         <div className={maximized ? "h-full w-full" : "lg:col-span-8"}>
@@ -1020,7 +1094,7 @@ export default function Demo() {
           {/* Module timeline strip */}
           {!maximized && !tryYourselfMode && !inMiniDemo && videos.length > 1 && (
             <div className="mt-4 bg-white border border-slate-200 rounded-2xl p-3">
-              <div ref={moduleStripRef} className="flex items-center gap-2 overflow-x-auto thin-scroll scroll-smooth">
+              <ScrollStrip innerRef={moduleStripRef} testIdPrefix="module-strip">
                 {videos.map((v, i) => (
                   <button
                     key={v.id}
@@ -1037,7 +1111,7 @@ export default function Demo() {
                     <span className="opacity-60 mr-1">{i + 1}.</span>{v.title}
                   </button>
                 ))}
-              </div>
+              </ScrollStrip>
             </div>
           )}
 
@@ -1045,7 +1119,7 @@ export default function Demo() {
           {!maximized && !tryYourselfMode && chapters.length > 0 && (
             <div className="mt-3 bg-white border border-slate-200 rounded-2xl p-3">
               <div className="text-xs uppercase tracking-widest text-slate-500 font-bold mb-2">Chapters</div>
-              <div ref={chapterStripRef} className="flex items-center gap-2 overflow-x-auto thin-scroll scroll-smooth">
+              <ScrollStrip innerRef={chapterStripRef} testIdPrefix="chapter-strip">
                 {chapters.map((ch, i) => {
                   const isActive = i === activeChapterIdx;
                   return (
@@ -1066,7 +1140,7 @@ export default function Demo() {
                     </button>
                   );
                 })}
-              </div>
+              </ScrollStrip>
             </div>
           )}
 
@@ -1082,11 +1156,12 @@ export default function Demo() {
           )}
         </div>
 
-        {/* ── AI Chat sidebar / floating ── */}
-        {!maximized ? (
+        {/* ── AI Chat sidebar (desktop) / floating drawer (mobile + maximized) ── */}
+        {!maximized && (
           <aside
-            className="bg-white border border-slate-200 rounded-2xl flex flex-col h-[calc(100vh-180px)] sticky top-[72px]"
+            className="hidden lg:flex lg:col-span-4 bg-white border border-slate-200 rounded-2xl flex-col h-[calc(100vh-100px)] sticky top-[72px] overflow-hidden"
             style={{ width: chatWidth, minWidth: 260, maxWidth: 900 }}
+            data-testid="chat-sidebar-desktop"
           >
             <div className="relative">
               <div style={{ position: 'absolute', left: -8, top: 0, bottom: 0, width: 16, cursor: 'ew-resize' }}
@@ -1095,9 +1170,8 @@ export default function Demo() {
                    onMouseUp={() => { draggingRef.current = false; }}
                    onMouseMove={(e) => {
                      if (!draggingRef.current) return;
-                     // compute new width based on mouse position relative to right edge
                      const rect = e.currentTarget.parentElement.getBoundingClientRect();
-                     const newW = window.innerWidth - e.clientX - 32; // right padding
+                     const newW = window.innerWidth - e.clientX - 32;
                      if (newW >= 260 && newW <= 900) setChatWidth(newW);
                    }}
               />
@@ -1110,17 +1184,35 @@ export default function Demo() {
             />
             <ChatInput lang={lang} chatInput={chatInput} setChatInput={setChatInput} send={sendChat} wsRef={wsRef} />
           </aside>
-        ) : chatOpen ? (
-          <div className="fixed bottom-6 right-6 w-96 h-[520px] bg-white border border-slate-200 rounded-2xl shadow-2xl flex flex-col z-50">
-            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+        )}
+
+        {/* Mobile + maximized: floating chat drawer */}
+        {chatOpen ? (
+          <div
+            className={`fixed z-50 bg-white border border-slate-200 shadow-2xl flex flex-col
+                        inset-x-3 bottom-3 top-16 rounded-2xl
+                        sm:inset-x-4 sm:bottom-4 sm:top-20
+                        ${maximized ? "lg:bottom-6 lg:right-6 lg:left-auto lg:top-auto lg:w-96 lg:h-[520px] lg:inset-x-auto" : "lg:hidden"}`}
+            data-testid="chat-drawer-mobile"
+          >
+            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3 flex-shrink-0">
               <div className="flex items-center gap-2">
-                <div className="h-8 w-8 rounded-full bg-orange-100 grid place-items-center">
-                  <Sparkles className="h-4 w-4 text-orange-600" />
+                <div className={`h-8 w-8 rounded-full grid place-items-center ${agentLive ? 'bg-emerald-100' : 'bg-orange-100'}`}>
+                  {agentLive
+                    ? <UserCheck className="h-4 w-4 text-emerald-600" />
+                    : <Sparkles className="h-4 w-4 text-orange-600" />
+                  }
                 </div>
-                <div className="font-display font-bold text-secondary">Biziverse AI</div>
+                <div>
+                  <div className="font-display font-bold text-secondary text-sm">{agentLive ? 'Live Support' : 'Biziverse AI'}</div>
+                  <div className={`text-[11px] flex items-center gap-1.5 ${agentLive ? 'text-emerald-600' : 'text-slate-500'}`}>
+                    <span className={`h-1.5 w-1.5 rounded-full ${agentLive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
+                    {agentLive ? 'Agent is online' : 'AI assistant'}
+                  </div>
+                </div>
               </div>
-              <button onClick={() => setChatOpen(false)} className="text-slate-400 hover:text-slate-600">
-                <X className="h-4 w-4" />
+              <button onClick={() => setChatOpen(false)} data-testid="close-chat-drawer" className="text-slate-400 hover:text-slate-600">
+                <X className="h-5 w-5" />
               </button>
             </div>
             <ChatBody
@@ -1134,7 +1226,7 @@ export default function Demo() {
           <button
             data-testid="open-chat-bubble"
             onClick={() => setChatOpen(true)}
-            className="fixed bottom-6 right-6 h-14 w-14 rounded-full bg-orange-600 hover:bg-orange-700 text-white shadow-2xl shadow-orange-500/40 grid place-items-center z-50"
+            className={`fixed bottom-5 right-5 h-14 w-14 rounded-full bg-orange-600 hover:bg-orange-700 text-white shadow-2xl shadow-orange-500/40 grid place-items-center z-50 ${maximized ? "" : "lg:hidden"}`}
           >
             <MessageCircle className="h-6 w-6" />
           </button>
@@ -1361,7 +1453,7 @@ function ChatBody({ chat, chatLoading, chatEndRef, lang, onAccept, onDecline, on
                 ? "bg-orange-600 text-white rounded-tr-sm"
                 : "bg-slate-100 text-slate-800 rounded-tl-sm"
             }`}>
-              <div className="leading-relaxed">{m.text}</div>
+              <div className="leading-relaxed whitespace-pre-wrap break-words">{m.text}</div>
               {m.exec_cta && !m.clarify && (
                 <div className="flex gap-2 mt-2">
                   <Button data-testid="exec-cta" size="sm" onClick={openExec} className="bg-secondary hover:bg-secondary/90 text-white rounded-full text-xs h-8">

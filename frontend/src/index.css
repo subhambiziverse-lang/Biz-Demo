@@ -96,6 +96,10 @@
 .thin-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
 .thin-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
 
+/* Hide scrollbar utility (used by arrow-scrolled strips) */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
 /* Marquee */
 @keyframes marquee {
   0% { transform: translateX(0); }
