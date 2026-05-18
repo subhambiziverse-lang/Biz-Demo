@@ -273,6 +273,8 @@ export default function Demo() {
           const data = JSON.parse(ev.data);
           if (data.type === 'agent_joined') {
             setAgentLive(true);
+            // ← Use lead ID directly from WS payload — no extra API call needed
+            if (data.lead?.id) setActiveLeadId(data.lead.id);
             setChat(c => [...c, { _id: `sys_${Date.now()}`, role: 'system', text: `Agent ${data.agent?.name || 'Support'} joined the chat.` }]);
           }
           // Only process agent messages — user messages are added optimistically
@@ -316,6 +318,22 @@ export default function Demo() {
     const iv = setInterval(poll, 5000);
     return () => clearInterval(iv);
   }, [agentLive, activeLeadId]);
+
+  // REST fallback in case WS missed agent_joined (page refresh, reconnect etc.)
+  useEffect(() => {
+    if (agentLive || !sessionId) return;
+    const checkForAgent = async () => {
+      try {
+        const r = await api.get(`/live-leads/session/${sessionId}`);
+        if (r.data?.status === 'in_session' && r.data?.id) {
+          setAgentLive(true);
+          setActiveLeadId(r.data.id);
+        }
+      } catch (e) {} // 404 = no lead yet, fine
+    };
+    const iv = setInterval(checkForAgent, 15000);
+    return () => clearInterval(iv);
+  }, [agentLive, sessionId]);
 
   // Center active module chip
   useEffect(() => {
@@ -652,12 +670,22 @@ export default function Demo() {
     setChat(c => [...c, { _id: tempId, role: "user", text: q }]);
     setChatInput("");
 
-    // If a human agent is live on this session, route the message to the agent (skip AI)
-    if (agentLive && activeLeadId) {
-      try {
-        await api.post(`/live-leads/${activeLeadId}/messages`, { role: "user", type: "text", text: q });
-      } catch (e) { console.error("Failed to send to agent", e); }
-      return;
+    // If a human agent is live on this session, route ONLY to agent — never to AI
+    if (agentLive) {
+      let leadId = activeLeadId;
+      if (!leadId) {
+        // Fallback: try to fetch lead ID inline (in case WS payload was missed)
+        try {
+          const r = await api.get(`/live-leads/session/${sessionId}`);
+          if (r.data?.id) { setActiveLeadId(r.data.id); leadId = r.data.id; }
+        } catch (e) {}
+      }
+      if (leadId) {
+        try {
+          await api.post(`/live-leads/${leadId}/messages`, { role: "user", type: "text", text: q });
+        } catch (e) { console.error("Failed to send to agent", e); }
+      }
+      return; // Always return — never fall through to AI when agent is live
     }
 
     setChatLoading(true);

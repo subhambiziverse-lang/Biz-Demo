@@ -1267,7 +1267,7 @@ async def assign_live_lead(lead_id: str, user=Depends(admin_dep)):
         await db.live_lead_messages.insert_one({
             "id": msg_id,
             "live_lead_id": lead_id,
-            "role": "agent",
+            "role": "system",
             "type": "text",
             "text": f"Agent {user.get('name', user.get('user_id'))} has joined the chat.",
             "created_at": now_iso,
