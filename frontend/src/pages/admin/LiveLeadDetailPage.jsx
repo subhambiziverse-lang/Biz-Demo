@@ -172,7 +172,7 @@ export default function LiveLeadDetailPage() {
     } catch (e) { setAgentOnline(!newVal); }
   };
 
-  const useKbAnswer = async (kbId) => {
+  const applyKbAnswer = async (kbId) => {
     try {
       const all = await api.get("/admin/kb");
       const entry = (all.data || []).find(k => k.id === kbId);
@@ -351,7 +351,7 @@ export default function LiveLeadDetailPage() {
               <button
                 key={s.id}
                 data-testid={`kb-suggestion-${s.id}`}
-                onClick={() => useKbAnswer(s.id)}
+                onClick={() => applyKbAnswer(s.id)}
                 title={s.snippet}
                 className="text-xs bg-[#2b5278] hover:bg-[#3a6a9a] text-white/90 px-3 py-1.5 rounded-full transition-colors truncate max-w-[240px]"
               >
