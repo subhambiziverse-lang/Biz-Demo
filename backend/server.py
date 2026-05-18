@@ -1250,12 +1250,12 @@ async def assign_live_lead(lead_id: str, user=Depends(admin_dep)):
     lead = await db.live_leads.find_one({"id": lead_id})
     if not lead:
         raise HTTPException(404, "Live lead not found")
-    # Mark the lead as in-session/live and record assignment
+  # Mark the lead as active/live and record assignment
     now_iso = datetime.now(timezone.utc).isoformat()
     await db.live_leads.update_one({"id": lead_id}, {
         "$set": {
             "assigned_to": user["user_id"],
-            "status": "in_session",
+            "status": "active",
             "in_session_at": now_iso,
             "updated_at": now_iso
         }

@@ -110,8 +110,8 @@ export default function LiveLeadDetailPage() {
       ws.onerror = () => setWsConnected(false);
     } catch (e) {}
 
-    // Polling fallback every 4s
-    pollId = setInterval(loadMessages, 4000);
+    // Polling fallback every 3s
+    pollId = setInterval(loadMessages, 3000);
 
     return () => {
       if (wsRef.current) try { wsRef.current.close(); } catch (e) {}

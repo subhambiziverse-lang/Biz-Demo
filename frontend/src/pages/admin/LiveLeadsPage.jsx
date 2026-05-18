@@ -6,11 +6,11 @@ import { toast } from "sonner";
 import { Activity, Clock, Archive } from "lucide-react";
 
 // Status grouping:
-//   Live    → assigned / active        (an agent has accepted the lead)
-//   Queue   → pending                  (lead waiting for an agent to assign)
+//   Live    → assigned / active / in_session  (an agent has accepted the lead)
+//   Queue   → pending                         (lead waiting for an agent to assign)
 //   History → closed / completed / resolved
 const TABS = [
-  { key: "live",    label: "Live",    icon: Activity, statuses: ["assigned", "active"] },
+  { key: "live",    label: "Live",    icon: Activity, statuses: ["assigned", "active", "in_session"] },
   { key: "queue",   label: "In Queue", icon: Clock,    statuses: ["pending"] },
   { key: "history", label: "History", icon: Archive,  statuses: ["closed", "completed", "resolved"] },
 ];
@@ -79,6 +79,8 @@ export default function LiveLeadsPage() {
     try {
       const res = await api.post(`/admin/live-leads/${id}/assign`);
       toast.success("Assigned. Opening chat…");
+      await load(); // refresh list so lead moves to Live tab
+      setTab("live"); // switch to Live tab
       const leadId = res.data?.lead?.id || id;
       nav(`/admin/live-leads/${leadId}`);
     } catch (err) {

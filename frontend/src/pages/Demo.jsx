@@ -240,6 +240,7 @@ export default function Demo() {
   const [pendingMini, setPendingMini] = useState(null);
   const [agentTyping, setAgentTyping] = useState(false);
   const [activeLeadId, setActiveLeadId] = useState(null);
+  const agentJoinedAtRef = useRef(null); // track when agent joined so we only show new messages
 
   // Track questions for CRM
   const [questionsAsked, setQuestionsAsked] = useState([]);
@@ -273,8 +274,8 @@ export default function Demo() {
           const data = JSON.parse(ev.data);
           if (data.type === 'agent_joined') {
             setAgentLive(true);
-            // ← Use lead ID directly from WS payload — no extra API call needed
             if (data.lead?.id) setActiveLeadId(data.lead.id);
+            agentJoinedAtRef.current = new Date().toISOString();
             setChat(c => [...c, { _id: `sys_${Date.now()}`, role: 'system', text: `Agent ${data.agent?.name || 'Support'} joined the chat.` }]);
           }
           // Only process agent messages — user messages are added optimistically
@@ -303,7 +304,11 @@ export default function Demo() {
     const poll = async () => {
       try {
         const r = await api.get(`/live-leads/${activeLeadId}/messages`);
-        const agentMsgs = (r.data || []).filter(m => m.role === 'agent');
+        const joinedAt = agentJoinedAtRef.current;
+        const agentMsgs = (r.data || []).filter(m =>
+          m.role === 'agent' &&
+          (!joinedAt || new Date(m.created_at) >= new Date(joinedAt))
+        );
         setChat(c => {
           const existingIds = new Set(c.map(m => m._id).filter(Boolean));
           const newMsgs = agentMsgs
@@ -315,7 +320,7 @@ export default function Demo() {
       } catch (e) {}
     };
     poll();
-    const iv = setInterval(poll, 5000);
+    const iv = setInterval(poll, 3000); // 3s for snappier response
     return () => clearInterval(iv);
   }, [agentLive, activeLeadId]);
 
@@ -325,13 +330,16 @@ export default function Demo() {
     const checkForAgent = async () => {
       try {
         const r = await api.get(`/live-leads/session/${sessionId}`);
-        if (r.data?.status === 'in_session' && r.data?.id) {
+        const s = r.data?.status;
+        if ((s === 'active' || s === 'in_session' || s === 'assigned') && r.data?.id) {
+          if (!agentJoinedAtRef.current) agentJoinedAtRef.current = new Date().toISOString();
           setAgentLive(true);
           setActiveLeadId(r.data.id);
         }
-      } catch (e) {} // 404 = no lead yet, fine
+      } catch (e) {}
     };
-    const iv = setInterval(checkForAgent, 15000);
+    checkForAgent();
+    const iv = setInterval(checkForAgent, 5000);
     return () => clearInterval(iv);
   }, [agentLive, sessionId]);
 
@@ -651,16 +659,14 @@ export default function Demo() {
   // ── Send chat message ──
   // When agent joins, resolve the live_lead_id so we can mirror user messages to the agent
   useEffect(() => {
-    if (!agentLive || !sessionId) { return; }
-    let cancelled = false;
+    if (!agentLive || activeLeadId || !sessionId) return;
     (async () => {
       try {
         const r = await api.get(`/live-leads/session/${sessionId}`);
-        if (!cancelled && r.data?.id) setActiveLeadId(r.data.id);
-      } catch (e) { /* lead may not exist yet — ignore */ }
+        if (r.data?.id) setActiveLeadId(r.data.id);
+      } catch (e) {}
     })();
-    return () => { cancelled = true; };
-  }, [agentLive, sessionId]);
+  }, [agentLive, activeLeadId, sessionId]);
 
   const sendChat = async () => {
     if (!chatInput.trim()) return;
